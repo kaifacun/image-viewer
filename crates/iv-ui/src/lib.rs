@@ -16,6 +16,8 @@ pub struct UiModel<'a> {
     pub has_image: bool,
     /// 목록(브라우저)으로 돌아갈 수 있는가
     pub can_browse: bool,
+    /// 저장하지 않은 회전이 있는가 (저장 버튼)
+    pub rotated: bool,
 }
 
 fn panel_frame() -> Frame {
@@ -79,6 +81,16 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
                 btn(ui, "맞춤", "화면 맞춤 (0)", Action::Fit);
                 btn(ui, "1:1", "원본 크기 (1)", Action::ActualSize);
                 btn(ui, "정보", "정보 (I)", Action::ToggleInfo);
+                ui.separator();
+                btn(ui, "왼쪽 회전", "왼쪽으로 90° (L)", Action::RotateCcw);
+                btn(ui, "오른쪽 회전", "오른쪽으로 90° (R)", Action::RotateCw);
+                if m.rotated
+                    && ui.add(egui::Button::new(RichText::new("저장").size(14.0).color(Color32::from_rgb(120, 190, 255))).frame(false))
+                        .on_hover_text("돌린 방향을 원본에 저장 (⌘S) — 화질 손실 없음")
+                        .clicked()
+                {
+                    actions.push(Action::SaveRotation);
+                }
                 ui.separator();
                 ui.label(RichText::new(m.status).color(Color32::from_gray(225)).size(13.0));
             });

@@ -48,6 +48,10 @@ pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode)
             ("9", _, Mode::View) => Some(Action::FitAlways),
             ("1", _, Mode::View) => Some(Action::ActualSize),
             ("i", false, Mode::View) => Some(Action::ToggleInfo),
+            // 회전 (전체 보기): R 시계 · L/⇧R 반시계 · ⌘S 저장 (⌘R 은 새로고침)
+            ("r", false, Mode::View) => Some(Action::RotateCw),
+            ("R" | "l" | "L", false, Mode::View) => Some(Action::RotateCcw),
+            ("s", true, Mode::View) => Some(Action::SaveRotation),
             _ => None,
         },
         _ => None,
@@ -56,6 +60,10 @@ pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode)
 
 /// 자가 시험용 키 이름 → winit 키
 pub fn named(name: &str) -> Option<Key> {
+    // 글자 한 개는 글자 키 (r·l 회전 등)
+    if name.chars().count() == 1 {
+        return Some(Key::Character(name.into()));
+    }
     Some(Key::Named(match name {
         "left" => NamedKey::ArrowLeft,
         "right" => NamedKey::ArrowRight,

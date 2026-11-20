@@ -272,7 +272,7 @@ impl App {
         ok
     }
 
-    //#region 파일·폴더 작업 — 디스크 작업은 여기(iv-fsops), 목록 반영은 뷰어, 트리 반영은 여기
+    //#region 파일·폴더 작업 — 디스크 작업은 여기(iv-fsops·iv-rotate), 목록 반영은 뷰어, 트리 반영은 여기
     fn file_op(&mut self, el: &ActiveEventLoop) {
         let Some(op) = self.viewer.take_file_op() else { return };
         if let FileOp::MoveTo { dest } = &op {
@@ -281,7 +281,7 @@ impl App {
         }
         let target = match &op {
             FileOp::NewFolder { parent, .. } => parent.join("x"),
-            FileOp::RenameFolder { path, .. } | FileOp::RenameFile { path, .. } => path.clone(),
+            FileOp::RenameFolder { path, .. } | FileOp::RenameFile { path, .. } | FileOp::Rotate { path, .. } => path.clone(),
             FileOp::MoveTo { dest } => dest.clone(),
         };
         let result = if !self.selftest_allows(&target) {
@@ -290,6 +290,7 @@ impl App {
             match &op {
                 FileOp::NewFolder { parent, name } => iv_fsops::create_folder(parent, name),
                 FileOp::RenameFolder { path, name } | FileOp::RenameFile { path, name } => iv_fsops::rename(path, name),
+                FileOp::Rotate { path, quarters } => rotate_file(path, *quarters),
                 FileOp::MoveTo { .. } => Err("내부 오류".to_string()),
             }
         };
@@ -308,6 +309,7 @@ impl App {
                 self.tree.renamed(path, p);
             }
             (FileOp::RenameFile { path, .. }, Ok(p)) => log::info!("이름 바꿈: {} → {}", path.display(), p.display()),
+            (FileOp::Rotate { quarters, .. }, Ok(p)) => log::info!("돌려 저장 ({}°): {}", *quarters as u32 * 90, p.display()),
             (_, Err(e)) => log::warn!("파일 작업 실패: {e}"),
             (FileOp::MoveTo { .. }, Ok(_)) => {}
         }
@@ -544,6 +546,7 @@ impl App {
                 info: &self.info_rows,
                 has_image: self.viewer.current().is_some(),
                 can_browse: self.viewer.browse_available,
+                rotated: self.viewer.turns() != 0,
             };
             ctx.run_pass(raw, |ctx| ui_actions = iv_ui::draw(ctx, &model))
         };
@@ -742,7 +745,13 @@ impl App {
                     }
                     return Some(Instant::now() + Duration::from_millis(16));
                 }
-                Step::Key(name) => match input::named(&name) {
+                Step::Key(name) => {
+                // "cmd+s" = ⌘ 를 누른 채
+                let (mods, name) = match name.strip_prefix("cmd+") {
+                    Some(b) => (ModifiersState::SUPER, b.to_string()),
+                    None => (ModifiersState::empty(), name),
+                };
+                match input::named(&name) {
                     // 실제 입력과 같은 관문: 글 입력 칸에 포커스가 있으면 키는 egui 몫 (앱 단축키로 새지 않음)
                     Some(_) if self.gfx.as_ref().and_then(|g| g.egui.as_ref()).is_some_and(|(ctx, _)| ctx.text_edit_focused()) => {
                         if let Some(key) = egui::Key::from_name(&name).or(match name.as_str() {
@@ -763,12 +772,13 @@ impl App {
                     }
                     Some(k) => {
                         let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
-                        if let Some(a) = input::key_action(&k, ModifiersState::empty(), fullscreen, self.viewer.mode) {
+                        if let Some(a) = input::key_action(&k, mods, fullscreen, self.viewer.mode) {
                             self.handle(a, el);
                         }
                     }
                     None => log::warn!("자가 시험: 알 수 없는 키 {name}"),
-                },
+                }
+                }
                 Step::WaitScan(ms) => {
                     self.wait_scan_until = Some(Instant::now() + Duration::from_millis(ms));
                     return Some(Instant::now() + Duration::from_millis(30));
@@ -968,7 +978,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
                 if let Some(a) = input::key_action(&event.logical_key, self.mods, fullscreen, self.viewer.mode) {
                     // 키를 누르고 있어도 휴지통은 한 번만 (반복 입력이 다음 장을 연달아 지우지 않게)
-                    if !(event.repeat && a == Action::Trash) {
+                    if !(event.repeat && matches!(a, Action::Trash | Action::SaveRotation)) {
                         self.handle(a, el);
                     }
                 }
@@ -1041,4 +1051,11 @@ impl ApplicationHandler<UserEvent> for App {
             None => ControlFlow::Wait,
         });
     }
+}
+
+/// 파일에 적힌 방향에서 시계 방향 90° × `quarters` 더 돌린 방향으로 저장 (방향 태그만 — 픽셀 재압축 없음)
+fn rotate_file(path: &std::path::Path, quarters: u8) -> Result<PathBuf, String> {
+    let current = iv_rotate::read_orientation(path).ok_or("사진 방향을 읽지 못함")?;
+    iv_rotate::save_orientation(path, current.rotated_quarters(quarters))?;
+    Ok(path.to_path_buf())
 }

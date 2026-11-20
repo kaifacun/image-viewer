@@ -48,6 +48,8 @@
 - 파일 작업(새 폴더·이름 바꾸기·옮기기)은 `iv-fsops` — **덮어쓰기 금지**. 흐름: UI 대화 상자(`iv-ui/dialog.rs`) → `Action::NewFolder/RenameFolder/RenameFile` → 뷰어가 `FileOp` 보관 + `AppRequest::FileOp` → 앱이 실행 → `on_file_op` 로 목록 반영, 트리는 앱이(`renamed`·`invalidate`). 새/이름 바꾼 폴더는 `keep_visible` 로 숨김 예외. 시험: `act:newfolder=|renamefile=|renamefolder=<경로>|<이름>`, `act:move=<폴더>`, `type:글`, `key:f2`, `drag:x0,y0,x1,y1`(egui 드래그 판정 경유).
 - 끌어다 놓기: 타일은 `Sense::CLICK | Sense::DRAG`, 페이로드 `DragPhotos`(표식만 — 대상은 뷰어 선택), 트리 줄이 `dnd_release_payload` 로 `Action::MoveMarkedTo`. 자가 시험에서 shift-click 직후 바로 dblclick 하면 egui 가 세 번 클릭으로 본다(wait 넣기).
 - 휴지통은 `iv-trash`(NSFileManager `trashItemAtURL`). 실패 시 `remove_file` 로 대체 금지.
+- **회전은 뷰어 상태(`turns`)** — 프레임에 굽지 않는다(파이프라인이 미리보기→본 디코드로 프레임을 갈아 끼우면 사라짐). `show()` 한 곳에서 `Orientation::rotated_quarters` 로 입히고, 다른 장·목록으로 가면 버린다. 렌더러(wgpu `upload`, CPU 축소 사본)는 **같은 픽셀이어도 방향은 매번 따라가야** 한다.
+- 돌려 저장은 `iv-rotate`: ImageIO `CopyImageSource` + `kCGImageDestinationOrientation`(JPEG·HEIC·PNG·TIFF 모두 크기 거의 그대로 = 재압축 없음). 점 임시 파일 → 다시 열어 방향·크기 확인 → xattr·권한 복사 → **mtime 을 지금으로**(ImageIO 가 옛 시각을 옮겨 오고 JPEG 은 크기도 같아 EntryId·썸네일 캐시가 못 알아챔) → rename. 저장 방향 = 파일에 적힌 방향 + 돌린 양(`FileOp::Rotate{quarters}`). 시험 키: `key:r`, `key:l`, `key:cmd+s`.
 - 자가 시험 실입력: `click=x,y` `dblclick=x,y` `cmdclick:x,y` `shiftclick:x,y`(egui ModifiersChanged 주입) `scroll=x,y,dy`(점 좌표, egui 맞음 판정 경유), `key=right|enter|escape…`(단축키 표 경유), `wait-thumbs:ms`, `act:folder=|select=|activate=|toggle=|range=|selectall|trash|sort=size,desc|view|browse`.
 - 화면 검증: 앱 자가 캡처(IV_SELFTEST) 또는 `tools/winid.swift` 로 kaiiv 창 ID 를 얻어 `screencapture -l <id>` (창 단위만).
 

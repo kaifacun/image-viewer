@@ -68,7 +68,10 @@ impl<W: HasDisplayHandle + HasWindowHandle> CpuRenderer<W> {
         let target = ((frame.max_side() as f32 * mag).ceil() as u32).max(1);
         let ptr = frame.pixels.as_ptr();
         let reuse = self.scaled.as_ref().is_some_and(|s| s.src_ptr == ptr && s.frame.max_side() == target);
-        if !reuse {
+        if reuse {
+            // 같은 픽셀에 방향만 바뀌었을 수 있다 (사용자 회전)
+            self.scaled.as_mut().unwrap().frame.orientation = frame.orientation;
+        } else {
             let t = std::time::Instant::now();
             let f = iv_imageops::downscale_rgba8(frame, target);
             log::debug!("CPU 축소 사본 {}x{} {:.1}ms", f.width, f.height, t.elapsed().as_secs_f64() * 1000.0);

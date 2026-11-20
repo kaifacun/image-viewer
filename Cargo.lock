@@ -1448,7 +1448,7 @@ dependencies = [
 
 [[package]]
 name = "iv"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "egui",
  "egui-winit",
@@ -1464,6 +1464,7 @@ dependencies = [
  "iv-render",
  "iv-render-cpu",
  "iv-render-wgpu",
+ "iv-rotate",
  "iv-scan",
  "iv-thumbs",
  "iv-trash",
@@ -1476,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "iv-core"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "log",
  "thiserror 2.0.21",
@@ -1484,7 +1485,7 @@ dependencies = [
 
 [[package]]
 name = "iv-decode-image"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "image",
  "iv-core",
@@ -1495,7 +1496,7 @@ dependencies = [
 
 [[package]]
 name = "iv-decode-imageio"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "iv-core",
  "iv-decode-image",
@@ -1508,15 +1509,15 @@ dependencies = [
 
 [[package]]
 name = "iv-fsops"
-version = "0.4.6"
+version = "0.4.7"
 
 [[package]]
 name = "iv-fstree"
-version = "0.4.6"
+version = "0.4.7"
 
 [[package]]
 name = "iv-imageops"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "fast_image_resize",
  "iv-core",
@@ -1524,7 +1525,7 @@ dependencies = [
 
 [[package]]
 name = "iv-library"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "iv-core",
  "log",
@@ -1532,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "iv-pipeline"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "iv-core",
  "log",
@@ -1541,7 +1542,7 @@ dependencies = [
 
 [[package]]
 name = "iv-render"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "egui",
  "iv-core",
@@ -1550,7 +1551,7 @@ dependencies = [
 
 [[package]]
 name = "iv-render-cpu"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "egui",
  "iv-core",
@@ -1565,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "iv-render-wgpu"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "bytemuck",
  "egui",
@@ -1580,8 +1581,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "iv-rotate"
+version = "0.4.7"
+dependencies = [
+ "image",
+ "iv-core",
+ "libc",
+ "objc2-core-foundation",
+ "objc2-image-io",
+]
+
+[[package]]
 name = "iv-scan"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "core-foundation-sys",
  "iv-core",
@@ -1591,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "iv-thumbs"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "image",
  "iv-core",
@@ -1603,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "iv-trash"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "objc2 0.6.5",
  "objc2-foundation 0.3.2",
@@ -1611,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "iv-ui"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "egui",
  "iv-core",
@@ -1623,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "iv-viewer"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "image",
  "iv-core",
@@ -1637,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "iv-viewport"
-version = "0.4.6"
+version = "0.4.7"
 
 [[package]]
 name = "jiff"

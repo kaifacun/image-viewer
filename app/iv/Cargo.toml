@@ -26,6 +26,7 @@ iv-fstree.workspace = true
 iv-trash.workspace = true
 iv-scan.workspace = true
 iv-fsops.workspace = true
+iv-rotate.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
 winit.workspace = true

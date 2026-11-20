@@ -79,6 +79,42 @@ impl Orientation {
             Self::Rotate270 => [0.0, -1.0, 1.0, 0.0, 1.0, 0.0],
         }
     }
+
+    pub const ALL: [Self; 8] = [
+        Self::Normal,
+        Self::FlipH,
+        Self::Rotate180,
+        Self::FlipV,
+        Self::Transpose,
+        Self::Rotate90,
+        Self::Transverse,
+        Self::Rotate270,
+    ];
+
+    /// EXIF 값 (1~8)
+    pub fn exif(self) -> u32 {
+        self as u32
+    }
+
+    //#region 사용자 회전 — 화면에 보이는 그림을 90° 단위로 더 돌린 방향
+    /// 보이는 그림을 시계 방향으로 90° 더 돌렸을 때의 방향.
+    /// 새 화면 UV (u', v') 는 돌리기 전 화면 UV (v', 1-u') 이므로 그 뒤에 원래 변환을 잇는다.
+    pub fn rotated_cw(self) -> Self {
+        let [a, b, c, d, tx, ty] = self.uv_transform();
+        // src = M·(v', 1-u') + t  =  (-b)u' + a v' + (b + tx),  (-d)u' + c v' + (d + ty)
+        let want = [-b, a, -d, c, b + tx, d + ty];
+        Self::ALL.into_iter().find(|o| o.uv_transform() == want).unwrap_or(self)
+    }
+
+    pub fn rotated_ccw(self) -> Self {
+        self.rotated_cw().rotated_cw().rotated_cw()
+    }
+
+    /// 시계 방향 90° 를 `quarters` 번 (0~3, 넘치면 4 로 나눈 나머지)
+    pub fn rotated_quarters(self, quarters: u8) -> Self {
+        (0..quarters % 4).fold(self, |o, _| o.rotated_cw())
+    }
+    //#endregion
 }
 
 /// 디코드 전에 알 수 있는 메타데이터
@@ -171,6 +207,27 @@ mod tests {
         // EXIF 8: 저장 오른쪽 위가 화면 왼쪽 위로 온다
         assert_eq!(map(Orientation::Rotate270, 0.0, 0.0), (1.0, 0.0));
         assert_eq!(map(Orientation::Rotate270, 0.0, 1.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn rotation_composes_like_turning_the_picture() {
+        assert_eq!(Orientation::Normal.rotated_cw(), Orientation::Rotate90);
+        assert_eq!(Orientation::Rotate90.rotated_cw(), Orientation::Rotate180);
+        assert_eq!(Orientation::Rotate180.rotated_cw(), Orientation::Rotate270);
+        assert_eq!(Orientation::Rotate270.rotated_cw(), Orientation::Normal);
+        for o in Orientation::ALL {
+            // 네 번 돌리면 제자리, 시계·반시계는 서로 되돌림, 축 교환은 한 번마다 뒤집힘
+            assert_eq!(o.rotated_quarters(4), o);
+            assert_eq!(o.rotated_cw().rotated_ccw(), o);
+            assert_ne!(o.rotated_cw().swaps_axes(), o.swaps_axes());
+            // 거울 상태는 회전으로 바뀌지 않는다 (FlipH 계열은 FlipH 계열로)
+            let mirrored = |o: Orientation| matches!(o, Orientation::FlipH | Orientation::FlipV | Orientation::Transpose | Orientation::Transverse);
+            assert_eq!(mirrored(o.rotated_cw()), mirrored(o));
+            // 저장 픽셀 기준으로 확인: 새 화면의 왼쪽 위 모서리 = 돌리기 전 화면의 왼쪽 아래 모서리
+            assert_eq!(map(o.rotated_cw(), 0.0, 0.0), map(o, 0.0, 1.0));
+            assert_eq!(map(o.rotated_cw(), 1.0, 0.0), map(o, 0.0, 0.0));
+            assert_eq!(map(o.rotated_cw(), 0.0, 1.0), map(o, 1.0, 1.0));
+        }
     }
 
     #[test]

@@ -277,7 +277,9 @@ impl Gpu {
     /// 프레임을 텍스처로 올리고 밉맵 생성
     fn upload(&mut self, key: u64, frame: &Arc<Frame>) {
         let ptr = frame.pixels.as_ptr();
-        if self.image.as_ref().is_some_and(|i| i.key == key && i.frame_ptr == ptr) {
+        if let Some(i) = self.image.as_mut().filter(|i| i.key == key && i.frame_ptr == ptr) {
+            // 같은 픽셀에 방향만 바뀌었을 수 있다 (사용자 회전) — 다시 올리지 않고 방향만 따른다
+            i.orientation = frame.orientation;
             return;
         }
         let t = std::time::Instant::now();

@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use iv_core::Frame;
+use iv_core::{Frame, Orientation};
 pub use iv_library::SortKey;
 use iv_library::{Entry, EntryId, Library};
 use iv_pipeline::{LoadEvent, Loader, Quality, Want, Window};
@@ -79,6 +79,13 @@ pub enum Action {
     RenameFile { path: PathBuf, name: String },
     /// 선택한 사진들을 이 폴더로 옮긴다 (썸네일을 트리에 끌어다 놓기)
     MoveMarkedTo(PathBuf),
+    // ── 회전 (전체 보기) ──
+    /// 보이는 그림을 시계 방향 90° (R)
+    RotateCw,
+    /// 반시계 방향 90° (L · ⇧R)
+    RotateCcw,
+    /// 돌린 상태를 원본 파일에 저장 (⌘S) — 방향 태그만, 픽셀 재압축 없음
+    SaveRotation,
 }
 
 /// 앱이 실행할 파일 작업
@@ -89,6 +96,8 @@ pub enum FileOp {
     RenameFile { path: PathBuf, name: String },
     /// 선택한 사진들([`ViewerState::trash_targets`] 와 같은 대상)을 옮김 — 결과는 [`ViewerState::on_moved`]
     MoveTo { dest: PathBuf },
+    /// 파일을 시계 방향 90° × `quarters` 만큼 더 돌린 방향으로 저장 (성공하면 같은 경로를 돌려준다)
+    Rotate { path: PathBuf, quarters: u8 },
 }
 
 /// 화면 모드
@@ -197,6 +206,11 @@ pub struct ViewerState {
     file_op: Option<FileOp>,
     /// 선택 상자를 시작할 때의 선택 (⌘/⇧ 로 더할 때 바탕)
     marquee_base: HashSet<EntryId>,
+    /// 전체 보기에서 사용자가 더 돌린 양 (시계 방향 90° 단위, 0~3). 파일은 저장 전까지 그대로.
+    /// 프레임은 파이프라인이 언제든 바꿔 넣으므로 회전은 여기 따로 두고 `show` 한 곳에서 입힌다.
+    turns: u8,
+    /// 화면 프레임의 원래(파일) 방향 — 회전을 다시 입힐 때 바탕
+    shown_base: Orientation,
 }
 
 const ZOOM_STEP: f32 = 1.25;
@@ -221,6 +235,8 @@ impl ViewerState {
             anchor: None,
             file_op: None,
             marquee_base: HashSet::new(),
+            turns: 0,
+            shown_base: Orientation::Normal,
         }
     }
 
@@ -371,6 +387,7 @@ impl ViewerState {
         self.generation += 1;
         self.error = None;
         self.shown = None;
+        self.turns = 0;
         // 평범한 이동 = 현재 항목 하나만 선택
         self.marked.clear();
         self.anchor = self.current_key().map(EntryId);
@@ -384,8 +401,12 @@ impl ViewerState {
         Effects::nav()
     }
 
-    fn show(&mut self, s: Shown) {
+    fn show(&mut self, mut s: Shown) {
         let same_entry = self.shown.as_ref().is_some_and(|o| o.key == s.key);
+        self.shown_base = s.frame.orientation;
+        if self.turns != 0 {
+            s.frame = Arc::new(Frame { orientation: self.shown_base.rotated_quarters(self.turns), ..(*s.frame).clone() });
+        }
         let size = s.frame.display_full_size();
         self.shown = Some(s);
         if !same_entry {
@@ -393,6 +414,37 @@ impl ViewerState {
             self.preview.set_image(size);
         }
     }
+
+    //#region 회전 — 화면에만 입히고, 저장은 앱이 (방향 태그만 바꿔)
+    /// 저장하지 않은 회전 (시계 방향 90° 단위)
+    pub fn turns(&self) -> u8 {
+        self.turns
+    }
+
+    fn set_turns(&mut self, turns: u8) -> Effects {
+        let turns = turns % 4;
+        if turns == self.turns {
+            return Effects::default();
+        }
+        self.turns = turns;
+        if let Some(s) = self.shown.as_mut() {
+            // 픽셀은 같은 Arc — 방향만 바뀐 프레임 (렌더러는 방향을 따라간다)
+            s.frame = Arc::new(Frame { orientation: self.shown_base.rotated_quarters(turns), ..(*s.frame).clone() });
+            let size = s.frame.display_full_size();
+            self.viewport.set_image(size);
+            self.preview.set_image(size);
+            self.viewport.fit();
+        }
+        Effects::redraw()
+    }
+
+    fn rotate(&mut self, delta: u8) -> Effects {
+        if self.mode != Mode::View || self.library.current().is_none() {
+            return Effects::default();
+        }
+        self.set_turns(self.turns + delta)
+    }
+    //#endregion
 
     pub fn handle(&mut self, action: Action, loader: &Loader) -> Effects {
         let center = [self.viewport.screen[0] / 2.0, self.viewport.screen[1] / 2.0];
@@ -408,6 +460,8 @@ impl ViewerState {
                 if self.mode == Mode::Browse || !self.browse_available {
                     return Effects::default();
                 }
+                // 저장하지 않은 회전은 버린다 (목록의 썸네일은 파일 그대로)
+                let _ = self.set_turns(0);
                 self.mode = Mode::Browse;
                 Effects::nav().with_reveal()
             }
@@ -518,6 +572,15 @@ impl ViewerState {
                 }
                 self.request(FileOp::MoveTo { dest })
             }
+            Action::RotateCw => self.rotate(1),
+            Action::RotateCcw => self.rotate(3),
+            Action::SaveRotation => {
+                let path = self.library.current().and_then(|e| e.path()).map(Path::to_path_buf);
+                match path {
+                    Some(path) if self.mode == Mode::View && self.turns != 0 => self.request(FileOp::Rotate { path, quarters: self.turns }),
+                    _ => Effects::default(),
+                }
+            }
             Action::Trash => {
                 if self.trash_targets().is_empty() {
                     return Effects::default();
@@ -600,6 +663,26 @@ impl ViewerState {
         };
         match op {
             FileOp::MoveTo { .. } => Effects::redraw(),
+            FileOp::Rotate { path, .. } => {
+                // 파일이 바뀌었다(mtime) → 항목을 다시 읽어 id 가 바뀐다. 화면 프레임은 이미 저장된 방향이라 그대로 둔다 (깜박임·확대 유지).
+                let Some((old_id, new_id)) = self.library.rename_entry(path, new) else { return Effects::redraw() };
+                if self.marked.remove(&old_id) {
+                    self.marked.insert(new_id);
+                }
+                if self.anchor == Some(old_id) {
+                    self.anchor = Some(new_id);
+                }
+                if let Some(s) = self.shown.as_mut().filter(|s| s.key == old_id.0) {
+                    s.key = new_id.0;
+                    self.shown_base = s.frame.orientation;
+                    self.turns = 0;
+                }
+                self.error = None;
+                self.generation += 1;
+                let mut fx = Effects::nav();
+                fx.library_changed = true;
+                fx
+            }
             FileOp::NewFolder { parent, .. } => {
                 // 열린 폴더 안이면 하위 폴더 수(상태줄)가 바뀌었다 — 선택은 refresh 가 지킨다
                 if self.library.dir() == Some(parent.as_path()) {
@@ -794,6 +877,9 @@ impl ViewerState {
         };
         let pos = format!("{}/{}", self.library.index() + 1, self.library.len());
         let mut s = format!("{}  ·  {pos}", e.name);
+        if self.turns != 0 {
+            s += &format!("  ·  {}° 돌림 (⌘S 저장)", self.turns as u32 * 90);
+        }
         if let Some(sh) = &self.shown {
             let [w, h] = sh.frame.display_full_size();
             s += &format!("  ·  {w}×{h}  ·  {:.0}%", self.viewport.scale * 100.0);
@@ -804,10 +890,11 @@ impl ViewerState {
                 Some(ms) => format!("  ·  {ms:.0}ms"),
                 None => "  ·  즉시".to_string(),
             };
-        } else if let Some(err) = &self.error {
-            s += &format!("  ·  오류: {err}");
-        } else {
+        } else if self.error.is_none() {
             s += "  ·  불러오는 중…";
+        }
+        if let Some(err) = &self.error {
+            s += &format!("  ·  오류: {err}");
         }
         s + &format!("  ·  {renderer}")
     }

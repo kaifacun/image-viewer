@@ -222,3 +222,62 @@ fn marquee_select_rules() {
     assert!(v.trash_targets().is_empty());
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// 회전: 화면에만 입히고(파이프라인이 프레임을 바꿔 넣어도 유지), 다른 장·목록으로 가면 버리며,
+/// ⌘S 는 돌린 양을 파일 작업으로 내고, 저장 성공 뒤에는 새 항목 id 로 같은 화면을 이어 간다.
+#[test]
+fn rotation_is_view_state_until_saved() {
+    use iv_core::Orientation;
+    use iv_viewer::FileOp;
+    let (d, l, mut v) = setup("rot", 3);
+    let _ = v.open(&d, &l);
+    let _ = v.handle(Action::Activate(0), &l);
+    l.set_window(&v.window());
+    let t = std::time::Instant::now();
+    while v.shown.is_none() && t.elapsed().as_secs() < 5 {
+        for ev in l.drain() {
+            let _ = v.on_load_event(ev);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let size = v.shown.as_ref().expect("불러오기").frame.display_full_size();
+    assert_ne!(size[0], size[1], "가로·세로가 다른 그림이어야 시험이 된다");
+    // 아직 돌리지 않았으면 저장할 것이 없다
+    assert!(v.handle(Action::SaveRotation, &l).app.is_none());
+    let _ = v.handle(Action::RotateCw, &l);
+    assert_eq!(v.turns(), 1);
+    let sh = v.shown.as_ref().unwrap();
+    assert_eq!(sh.frame.orientation, Orientation::Rotate90);
+    assert_eq!(sh.frame.display_full_size(), [size[1], size[0]]);
+    assert!(v.status_line("t").contains("90° 돌림"));
+    // 반시계 두 번 = 시계 세 번 = 270°
+    let _ = v.handle(Action::RotateCcw, &l);
+    let _ = v.handle(Action::RotateCcw, &l);
+    assert_eq!(v.turns(), 3);
+    // 저장 요청: 돌린 양 그대로
+    let fx = v.handle(Action::SaveRotation, &l);
+    assert!(fx.app.is_some());
+    let op = v.take_file_op().unwrap();
+    let path = v.current().unwrap().path().unwrap().to_path_buf();
+    assert_eq!(op, FileOp::Rotate { path: path.clone(), quarters: 3 });
+    // 저장 성공 (파일 mtime 이 바뀐 것으로) → 회전 상태는 파일 몫, 화면 방향은 그대로
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&path, std::fs::read(&path).unwrap()).unwrap();
+    let old_key = v.shown.as_ref().unwrap().key;
+    let _ = v.on_file_op(&op, &Ok(path.clone()), &l);
+    assert_eq!(v.turns(), 0);
+    let sh = v.shown.as_ref().unwrap();
+    assert_ne!(sh.key, old_key, "파일이 바뀌어 새 id");
+    assert_eq!(Some(sh.key), v.current().map(|e| e.id.0));
+    assert_eq!(sh.frame.orientation, Orientation::Rotate270);
+    // 돌리고 다른 장으로 가면 버린다
+    let _ = v.handle(Action::RotateCw, &l);
+    let _ = v.handle(Action::Next, &l);
+    assert_eq!(v.turns(), 0);
+    // 돌리고 목록으로 가도 버린다, 목록에서는 돌리지 않는다
+    let _ = v.handle(Action::RotateCw, &l);
+    let _ = v.handle(Action::ExitView, &l);
+    assert_eq!(v.turns(), 0);
+    assert!(!v.handle(Action::RotateCw, &l).redraw);
+    let _ = std::fs::remove_dir_all(&d);
+}

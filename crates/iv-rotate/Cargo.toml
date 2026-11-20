@@ -1,0 +1,17 @@
+[package]
+name = "iv-rotate"
+description = "사진 방향(EXIF Orientation)만 바꿔 원본에 저장 — 픽셀 재압축 없음 (macOS ImageIO)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2-core-foundation = { version = "0.3", features = ["CFDictionary", "CFNumber", "CFString", "CFURL", "CFError"] }
+objc2-image-io = { version = "0.3", features = ["CGImageSource", "CGImageDestination", "CGImageProperties"] }
+
+[dev-dependencies]
+image = { workspace = true, features = ["jpeg", "png"] }
