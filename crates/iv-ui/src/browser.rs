@@ -15,6 +15,7 @@ use iv_library::{Entry, EntryId};
 use iv_viewer::{Action, SortKey};
 
 use crate::dialog::{self, Dialog, DialogResult};
+use crate::icons::{Icon, icon_button};
 
 /// 썸네일 GPU 텍스처 묶음 (바이트 목표치 — 보이는 것 + 여유를 밑돌지 않음, 보이는 범위 밖부터 해제).
 /// 삽입은 egui 패스 안에서만 한다 ([`ThumbTextures::flush`]) — 텍스처 delta 가 그 패스 출력에 실리도록.
@@ -178,6 +179,8 @@ pub struct BrowserModel<'a> {
     pub failed: &'a HashSet<u64>,
     /// 백그라운드 스캔 상태 (상태줄 오른쪽)
     pub scan_status: &'a str,
+    /// 잘라낸(붙여넣으면 옮겨질) 파일 — 흐리게 그린다
+    pub cut: &'a HashSet<PathBuf>,
     /// 미리보기 칸에 렌더러가 실제 프레임을 그리는가 (아니면 썸네일로 대신 채움)
     pub preview_has_frame: bool,
 }
@@ -185,6 +188,8 @@ pub struct BrowserModel<'a> {
 #[derive(Default)]
 pub struct BrowserOut {
     pub actions: Vec<Action>,
+    /// 클립보드에 넣을 글 (트리 폴더 경로 복사) — 앱이 쓴다
+    pub copy_text: Option<String>,
     /// 펼침/접기 전환할 트리 노드
     pub tree_toggle: Option<PathBuf>,
     /// 트리 표시 설정이 바뀜 (다시 만들어야 함)
@@ -310,6 +315,11 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
             }
         });
         ui.menu_button("편집", |ui| {
+            let some = !m.marked.is_empty();
+            clip_items(ui, some, m.dir.is_some(), None, out);
+            ui.separator();
+            rotate_items(ui, some, out);
+            ui.separator();
             if ui.add_enabled(!m.entries.is_empty(), egui::Button::new("모두 선택  ⌘A")).clicked() {
                 out.actions.push(Action::SelectAll);
             }
@@ -331,6 +341,36 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
         });
         ui.menu_button("정렬", |ui| sort_items(ui, m, out));
     });
+}
+
+/// 복사·잘라내기·붙여넣기·경로 복사 메뉴 항목 (`paste_to` = 붙여넣을 폴더, None 이면 열린 폴더)
+fn clip_items(ui: &mut egui::Ui, some: bool, can_paste: bool, paste_to: Option<&Path>, out: &mut BrowserOut) {
+    if ui.add_enabled(some, egui::Button::new("복사  ⌘C")).clicked() {
+        out.actions.push(Action::Copy);
+        ui.close();
+    }
+    if ui.add_enabled(some, egui::Button::new("잘라내기  ⌘X")).clicked() {
+        out.actions.push(Action::Cut);
+        ui.close();
+    }
+    if ui.add_enabled(can_paste, egui::Button::new("붙여넣기  ⌘V")).clicked() {
+        out.actions.push(Action::Paste(paste_to.map(Path::to_path_buf)));
+        ui.close();
+    }
+    if ui.button("경로 복사  ⌘C + Option").clicked() {
+        out.actions.push(Action::CopyPath);
+        ui.close();
+    }
+}
+
+/// 선택한 사진 일괄 회전 (바로 저장 — 방향 태그만)
+fn rotate_items(ui: &mut egui::Ui, some: bool, out: &mut BrowserOut) {
+    for (label, q) in [("왼쪽으로 90° 돌리기", 3), ("오른쪽으로 90° 돌리기", 1), ("180° 돌리기", 2)] {
+        if ui.add_enabled(some, egui::Button::new(label)).on_hover_text("원본에 바로 저장 — 화질 손실 없음").clicked() {
+            out.actions.push(Action::RotateMarked(q));
+            ui.close();
+        }
+    }
 }
 
 /// "휴지통으로 이동" — 여러 장이면 장 수를 붙인다
@@ -373,6 +413,13 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
         if ui.add_enabled(!m.marked.is_empty(), egui::Button::new("휴지통")).on_hover_text("선택한 사진을 휴지통으로 (⌘⌫)").clicked() {
             out.actions.push(Action::Trash);
         }
+        let some = !m.marked.is_empty();
+        if icon_button(ui, Icon::RotateLeft, "선택한 사진 왼쪽으로 90° 돌려 저장", some, true).clicked() {
+            out.actions.push(Action::RotateMarked(3));
+        }
+        if icon_button(ui, Icon::RotateRight, "선택한 사진 오른쪽으로 90° 돌려 저장", some, true).clicked() {
+            out.actions.push(Action::RotateMarked(1));
+        }
         ui.separator();
         ui.label("크기");
         ui.add(egui::Slider::new(&mut st.tile, TILE_MIN..=TILE_MAX).show_value(false));
@@ -387,7 +434,17 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
             st.path_edit = dir_s.clone();
             st.path_edit_for = m.dir.map(Path::to_path_buf);
         }
-        let r = ui.add(egui::TextEdit::singleline(&mut st.path_edit).desired_width(f32::INFINITY).hint_text("폴더 경로"));
+        // 오른쪽 끝에 경로 복사 버튼 자리를 남긴다
+        let w = (ui.available_width() - 34.0).max(80.0);
+        let r = ui.add(egui::TextEdit::singleline(&mut st.path_edit).desired_width(w).hint_text("폴더 경로"));
+        let tip = match m.marked.len() {
+            0 => "열린 폴더 경로 복사 (Option+⌘C)".to_string(),
+            1 => "선택한 사진의 절대 경로 복사 (Option+⌘C)".to_string(),
+            n => format!("선택한 사진 {n}장의 절대 경로 복사 — 한 줄에 하나 (Option+⌘C)"),
+        };
+        if icon_button(ui, Icon::Copy, &tip, m.dir.is_some(), true).clicked() {
+            out.actions.push(Action::CopyPath);
+        }
         if r.lost_focus() {
             let p = PathBuf::from(st.path_edit.trim());
             // Enter 로 확정했고 폴더가 있으면 이동, 아니면(다른 곳 클릭·Esc·없는 경로) 현재 경로로 되돌린다
@@ -445,6 +502,15 @@ fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, o
                         st.dialog = Some(Dialog::rename_folder(row.path.clone()));
                         ui.close();
                     }
+                    ui.separator();
+                    if ui.button("여기에 붙여넣기").clicked() {
+                        out.actions.push(Action::Paste(Some(row.path.clone())));
+                        ui.close();
+                    }
+                    if ui.button("경로 복사").clicked() {
+                        out.copy_text = Some(row.path.display().to_string());
+                        ui.close();
+                    }
                 });
                 //#endregion
                 //#region 폴더 옆 숫자 — 사진 N장 · 하위 폴더 N
@@ -469,9 +535,12 @@ fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, o
 fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
     let n = m.entries.len();
     if n == 0 {
-        ui.centered_and_justified(|ui| {
+        let r = ui.centered_and_justified(|ui| {
             ui.label(RichText::new(if m.dir.is_some() { "이 폴더에는 사진이 없습니다" } else { "왼쪽에서 폴더를 고르세요" }).color(Color32::from_gray(150)));
         });
+        if m.dir.is_some() {
+            ui.interact(r.response.rect, ui.scope_id().with("iv-empty-bg"), Sense::click()).context_menu(|ui| background_menu(ui, st, m, out));
+        }
         return;
     }
     let tile = st.tile.clamp(TILE_MIN, TILE_MAX);
@@ -518,6 +587,7 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
         if bg.clicked() && !mods.command && !mods.shift {
             out.actions.push(Action::SelectNone);
         }
+        bg.context_menu(|ui| background_menu(ui, st, m, out));
         if bg.drag_started() {
             if let Some(p) = bg.interact_pointer_pos() {
                 st.marquee = Some(Marquee { start: p - origin, keep: mods.command || mods.shift, last: Vec::new(), sent_begin: false });
@@ -575,6 +645,15 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
                             st.begin_rename_file(p);
                         }
                         ui.close();
+                    }
+                    ui.separator();
+                    // 아래 동작은 선택 기준 — 선택에 없는 사진이면 먼저 그 사진만 고른다
+                    let before = out.actions.len();
+                    clip_items(ui, true, m.dir.is_some(), None, out);
+                    ui.separator();
+                    rotate_items(ui, true, out);
+                    if out.actions.len() > before && !marked {
+                        out.actions.insert(before, Action::Select(i));
                     }
                     ui.separator();
                     let n = if marked { m.marked.len() } else { 1 };
@@ -640,6 +719,24 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
     });
 }
 
+/// 격자 빈 곳 오른쪽 클릭 — 이 폴더에 붙여넣기 · 새 폴더
+fn background_menu(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+    if ui.button("붙여넣기  ⌘V").clicked() {
+        out.actions.push(Action::Paste(None));
+        ui.close();
+    }
+    if ui.button("새 폴더…  ⇧⌘N").clicked() {
+        if let Some(d) = m.dir {
+            st.begin_new_folder(d);
+        }
+        ui.close();
+    }
+    if ui.button("폴더 경로 복사").clicked() {
+        out.copy_text = m.dir.map(|d| d.display().to_string());
+        ui.close();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_tile(painter: &egui::Painter, st: &BrowserState, m: &BrowserModel<'_>, e: &Entry, cell: Rect, tile: f32, selected: bool, current: bool, hovered: bool) {
     let bg = if selected {
@@ -653,7 +750,9 @@ fn draw_tile(painter: &egui::Painter, st: &BrowserState, m: &BrowserModel<'_>, e
     let img_box = Rect::from_min_size(cell.min, Vec2::splat(tile)).shrink(6.0);
     if let Some(tex) = st.textures.get(e.id.0) {
         let r = fit_rect(img_box, tex.size_vec2(), false);
-        painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        let cut = e.path().is_some_and(|p| m.cut.contains(p));
+        let tint = if cut { Color32::WHITE.gamma_multiply(0.4) } else { Color32::WHITE };
+        painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
     } else if m.failed.contains(&e.id.0) {
         painter.text(img_box.center(), Align2::CENTER_CENTER, "열 수 없음", FontId::proportional(12.0), Color32::from_rgb(230, 160, 90));
     } else {

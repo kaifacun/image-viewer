@@ -1,0 +1,13 @@
+[package]
+name = "iv-clipboard"
+description = "시스템 클립보드 — 파일 복사·붙여넣기(Finder 와 호환)와 글(경로) 복사 (macOS NSPasteboard)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSPasteboard", "NSPasteboardItem"] }

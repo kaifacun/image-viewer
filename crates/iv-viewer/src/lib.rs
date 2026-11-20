@@ -86,6 +86,17 @@ pub enum Action {
     RotateCcw,
     /// 돌린 상태를 원본 파일에 저장 (⌘S) — 방향 태그만, 픽셀 재압축 없음
     SaveRotation,
+    /// 브라우저: 선택한 사진들을 시계 방향 90° × n 돌려 바로 저장 (오른쪽 클릭 일괄 회전)
+    RotateMarked(u8),
+    // ── 클립보드 (실제 작업은 앱이) ──
+    /// ⌘C — 선택한 사진(전체 보기는 보고 있는 장)을 클립보드에 (Finder 에 붙여넣기 가능)
+    Copy,
+    /// ⌘X — 복사 + 붙여넣을 때 옮기기
+    Cut,
+    /// ⌘V — 클립보드의 파일을 이 폴더(None = 열린 폴더)에
+    Paste(Option<PathBuf>),
+    /// ⌥⌘C — 선택한 사진의 절대 경로(없으면 열린 폴더 경로)를 글로 복사
+    CopyPath,
 }
 
 /// 앱이 실행할 파일 작업
@@ -98,6 +109,18 @@ pub enum FileOp {
     MoveTo { dest: PathBuf },
     /// 파일을 시계 방향 90° × `quarters` 만큼 더 돌린 방향으로 저장 (성공하면 같은 경로를 돌려준다)
     Rotate { path: PathBuf, quarters: u8 },
+    /// 선택한 사진들([`ViewerState::trash_targets`])을 돌려 저장 — 결과는 [`ViewerState::on_rotated`]
+    RotateMarked { quarters: u8 },
+    /// 클립보드의 파일을 `dest` 에 복사(잘라냈으면 옮김) — 결과는 [`ViewerState::on_pasted`]
+    Paste { dest: PathBuf },
+}
+
+/// 클립보드 작업 (대상은 [`ViewerState::trash_targets`] / [`ViewerState::path_targets`])
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipOp {
+    Copy,
+    Cut,
+    CopyPath,
 }
 
 /// 화면 모드
@@ -118,6 +141,8 @@ pub enum AppRequest {
     Trash,
     /// [`ViewerState::take_file_op`] 를 실행하고 [`ViewerState::on_file_op`] 로 알려 달라
     FileOp,
+    /// 클립보드에 쓰기 — 끝나면 [`ViewerState::notice`] 로 알린다
+    Clipboard(ClipOp),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -195,6 +220,8 @@ pub struct ViewerState {
     pub shown: Option<Shown>,
     pub error: Option<String>,
     pub show_info: bool,
+    /// 상태줄 알림 (복사함·붙여넣음 등). 다른 곳으로 가면 지운다.
+    pub notice: Option<String>,
     pub config: ViewerConfig,
     generation: u64,
     extensions: HashSet<&'static str>,
@@ -228,6 +255,7 @@ impl ViewerState {
             shown: None,
             error: None,
             show_info: false,
+            notice: None,
             config,
             generation: 0,
             extensions,
@@ -386,6 +414,7 @@ impl ViewerState {
     fn after_navigation(&mut self, loader: &Loader) -> Effects {
         self.generation += 1;
         self.error = None;
+        self.notice = None;
         self.shown = None;
         self.turns = 0;
         // 평범한 이동 = 현재 항목 하나만 선택
@@ -572,6 +601,29 @@ impl ViewerState {
                 }
                 self.request(FileOp::MoveTo { dest })
             }
+            Action::RotateMarked(q) => {
+                if self.mode != Mode::Browse || q % 4 == 0 || self.trash_targets().is_empty() {
+                    return Effects::default();
+                }
+                self.request(FileOp::RotateMarked { quarters: q % 4 })
+            }
+            Action::Copy | Action::Cut => {
+                if self.trash_targets().is_empty() {
+                    return Effects::default();
+                }
+                let op = if action == Action::Copy { ClipOp::Copy } else { ClipOp::Cut };
+                Effects { app: Some(AppRequest::Clipboard(op)), ..Default::default() }
+            }
+            Action::CopyPath => {
+                if self.path_targets().is_empty() {
+                    return Effects::default();
+                }
+                Effects { app: Some(AppRequest::Clipboard(ClipOp::CopyPath)), ..Default::default() }
+            }
+            Action::Paste(dest) => match dest.or_else(|| self.library.dir().map(Path::to_path_buf)) {
+                Some(dest) => self.request(FileOp::Paste { dest }),
+                None => Effects::default(),
+            },
             Action::RotateCw => self.rotate(1),
             Action::RotateCcw => self.rotate(3),
             Action::SaveRotation => {
@@ -662,7 +714,7 @@ impl ViewerState {
             }
         };
         match op {
-            FileOp::MoveTo { .. } => Effects::redraw(),
+            FileOp::MoveTo { .. } | FileOp::RotateMarked { .. } | FileOp::Paste { .. } => Effects::redraw(),
             FileOp::Rotate { path, .. } => {
                 // 파일이 바뀌었다(mtime) → 항목을 다시 읽어 id 가 바뀐다. 화면 프레임은 이미 저장된 방향이라 그대로 둔다 (깜박임·확대 유지).
                 let Some((old_id, new_id)) = self.library.rename_entry(path, new) else { return Effects::redraw() };
@@ -738,6 +790,82 @@ impl ViewerState {
                 }
             }
         }
+    }
+    //#endregion
+
+    //#region 일괄 회전·클립보드 결과
+    /// 경로 복사 대상: 선택한 사진들, 없으면 열린 폴더
+    pub fn path_targets(&self) -> Vec<PathBuf> {
+        let v = self.trash_targets();
+        if !v.is_empty() {
+            return v;
+        }
+        self.library.dir().map(Path::to_path_buf).into_iter().collect()
+    }
+
+    /// 앱이 클립보드에 쓴 뒤 상태줄에 알림 (오류면 오류로)
+    pub fn on_clipboard(&mut self, result: Result<String, String>) -> Effects {
+        match result {
+            Ok(n) => self.notice = Some(n),
+            Err(e) => self.error = Some(e),
+        }
+        Effects::redraw()
+    }
+
+    /// 돌려 저장한 파일들: 다시 읽어 id 를 바꾸고(썸네일·미리보기 새로) 선택은 지킨다
+    pub fn on_rotated(&mut self, done: &[PathBuf], failures: &[String], loader: &Loader) -> Effects {
+        let cur = self.current_key();
+        let mut cur_changed = false;
+        for p in done {
+            if let Some((old, new)) = self.library.rename_entry(p, p.clone()) {
+                if self.marked.remove(&old) {
+                    self.marked.insert(new);
+                }
+                if self.anchor == Some(old) {
+                    self.anchor = Some(new);
+                }
+                cur_changed |= Some(old.0) == cur;
+            }
+        }
+        let mut fx = if cur_changed {
+            let (marked, anchor) = (std::mem::take(&mut self.marked), self.anchor);
+            let fx = self.after_navigation(loader);
+            self.marked = marked;
+            self.anchor = anchor;
+            fx
+        } else {
+            Effects::redraw()
+        };
+        fx.library_changed = true;
+        if !done.is_empty() {
+            self.notice = Some(format!("{}장 돌려 저장함", done.len()));
+        }
+        if !failures.is_empty() {
+            self.error = Some(format!("돌려 저장 못함 {}개: {}", failures.len(), failures[0]));
+        }
+        fx
+    }
+
+    /// 붙여넣기 결과: `created` = 새로 생긴 파일, `moved_from` = 잘라내기로 옮겨 간 원래 파일
+    pub fn on_pasted(&mut self, dest: &Path, created: &[PathBuf], moved_from: &[PathBuf], failures: &[String], loader: &Loader) -> Effects {
+        let mut fx = if !moved_from.is_empty() { self.on_removed(moved_from, &[], "", loader) } else { Effects::redraw() };
+        if self.library.dir() == Some(dest) && !created.is_empty() {
+            fx = fx.merge(self.refresh(loader));
+            // 붙여넣은 사진들을 선택해 보여준다
+            let ids: HashSet<EntryId> = self.library.entries().iter().filter(|e| e.path().is_some_and(|p| created.iter().any(|c| c == p))).map(|e| e.id).collect();
+            if let Some(i) = self.library.entries().iter().position(|e| ids.contains(&e.id)) {
+                fx = fx.merge(self.go(i, loader));
+                self.marked = ids;
+                fx = fx.with_reveal();
+            }
+        }
+        fx.library_changed = true;
+        let verb = if moved_from.is_empty() { "붙여넣음" } else { "옮김" };
+        self.notice = (!created.is_empty()).then(|| format!("{}장 {verb}", created.len()));
+        if !failures.is_empty() {
+            self.error = Some(format!("붙여넣지 못함 {}개: {}", failures.len(), failures[0]));
+        }
+        fx
     }
     //#endregion
 
@@ -862,6 +990,9 @@ impl ViewerState {
             }
             s += &format!("  {}", human_bytes(e.len));
         }
+        if let Some(n) = &self.notice {
+            s += &format!("  ·  {n}");
+        }
         if let Some(err) = &self.error {
             s += &format!("  ·  오류: {err}");
         }
@@ -893,6 +1024,9 @@ impl ViewerState {
             };
         } else if self.error.is_none() {
             s += "  ·  불러오는 중…";
+        }
+        if let Some(n) = &self.notice {
+            s += &format!("  ·  {n}");
         }
         if let Some(err) = &self.error {
             s += &format!("  ·  오류: {err}");

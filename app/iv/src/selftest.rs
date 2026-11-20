@@ -20,6 +20,8 @@ pub enum Step {
     /// 실입력 주입 (점 좌표) — egui 의 맞음 판정·가려짐까지 거친다
     Click(f32, f32),
     DoubleClick(f32, f32),
+    /// 오른쪽 클릭 (메뉴 열기)
+    RightClick(f32, f32),
     /// 끌어다 놓기 (점 좌표: 시작 x,y → 끝 x,y)
     Drag(f32, f32, f32, f32),
     /// 글 입력 (egui Text 이벤트 — 입력 칸에 포커스가 있을 때)
@@ -79,11 +81,12 @@ fn parse(t: &str) -> Option<Step> {
             let (w, h) = v.split_once('x')?;
             Step::Resize(w.parse().ok()?, h.parse().ok()?)
         }
-        "click" | "dblclick" | "cmdclick" | "shiftclick" => {
+        "click" | "dblclick" | "cmdclick" | "shiftclick" | "rclick" => {
             let (x, y) = v.split_once(',')?;
             let (x, y) = (x.trim().parse().ok()?, y.trim().parse().ok()?);
             match k {
                 "click" => Step::Click(x, y),
+                "rclick" => Step::RightClick(x, y),
                 "dblclick" => Step::DoubleClick(x, y),
                 "cmdclick" => Step::ModClick(x, y, true, false),
                 _ => Step::ModClick(x, y, false, true),
@@ -120,6 +123,10 @@ fn parse(t: &str) -> Option<Step> {
             "refresh" => Action::Refresh,
             "selectall" => Action::SelectAll,
             "trash" => Action::Trash,
+            "copy" => Action::Copy,
+            "cut" => Action::Cut,
+            "paste" => Action::Paste(None),
+            "copypath" => Action::CopyPath,
             other => {
                 if let Some(p) = other.strip_prefix("pan=") {
                     let (x, y) = p.split_once(',')?;
@@ -142,6 +149,10 @@ fn parse(t: &str) -> Option<Step> {
                 } else if let Some(n) = other.strip_prefix("renamefolder=") {
                     let (p, n) = n.split_once('|')?;
                     Action::RenameFolder { path: PathBuf::from(p), name: n.to_string() }
+                } else if let Some(p) = other.strip_prefix("paste=") {
+                    Action::Paste(Some(PathBuf::from(p)))
+                } else if let Some(q) = other.strip_prefix("rotatemarked=") {
+                    Action::RotateMarked(q.parse().ok()?)
                 } else if let Some(p) = other.strip_prefix("move=") {
                     Action::MoveMarkedTo(PathBuf::from(p))
                 } else if let Some(i) = other.strip_prefix("toggle=") {

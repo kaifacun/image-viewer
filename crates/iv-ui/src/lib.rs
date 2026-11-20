@@ -3,6 +3,7 @@
 
 pub mod browser;
 pub mod dialog;
+pub mod icons;
 
 use egui::{Align2, Color32, CornerRadius, Frame, Margin, RichText, Vec2};
 use iv_viewer::Action;
@@ -82,8 +83,12 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
                 btn(ui, "1:1", "원본 크기 (1)", Action::ActualSize);
                 btn(ui, "정보", "정보 (I)", Action::ToggleInfo);
                 ui.separator();
-                btn(ui, "왼쪽 회전", "왼쪽으로 90° (L)", Action::RotateCcw);
-                btn(ui, "오른쪽 회전", "오른쪽으로 90° (R)", Action::RotateCw);
+                if icons::icon_button(ui, icons::Icon::RotateLeft, "왼쪽으로 90° (L)", m.has_image, false).clicked() {
+                    actions.push(Action::RotateCcw);
+                }
+                if icons::icon_button(ui, icons::Icon::RotateRight, "오른쪽으로 90° (R)", m.has_image, false).clicked() {
+                    actions.push(Action::RotateCw);
+                }
                 if m.rotated
                     && ui.add(egui::Button::new(RichText::new("저장").size(14.0).color(Color32::from_rgb(120, 190, 255))).frame(false))
                         .on_hover_text("돌린 방향을 원본에 저장 (⌘S) — 화질 손실 없음")

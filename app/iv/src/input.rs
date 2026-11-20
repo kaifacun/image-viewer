@@ -40,6 +40,11 @@ pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode)
             ("q" | "w", true, _) => Some(Action::Quit),
             ("r", true, _) => Some(Action::Refresh),
             ("a", true, Mode::Browse) => Some(Action::SelectAll),
+            // 클립보드: ⌘C 복사 · ⌘X 잘라내기 · ⌘V 붙여넣기 · ⌥⌘C 경로 복사 (⌥ 면 글자가 ç 로 온다, 한글 입력이면 ㅊ·ㅌ·ㅍ)
+            ("c" | "C" | "ç" | "Ç" | "ㅊ", true, _) if mods.alt_key() => Some(Action::CopyPath),
+            ("c" | "ㅊ", true, _) => Some(Action::Copy),
+            ("x" | "ㅌ", true, _) => Some(Action::Cut),
+            ("v" | "ㅍ", true, _) => Some(Action::Paste(None)),
             ("n" | "N", true, Mode::Browse) if shift => Some(Action::BeginNewFolder),
             ("f", false, _) => Some(Action::ToggleFullscreen),
             ("=" | "+", _, Mode::View) => Some(Action::ZoomIn),

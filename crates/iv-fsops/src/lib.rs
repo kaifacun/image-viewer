@@ -88,6 +88,44 @@ pub fn move_into(file: &Path, dest: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// 파일을 `dest` 폴더에 복사한다. 같은 이름이 있으면 덮어쓰지 않고 "이름 사본.jpg", "이름 사본 2.jpg" … 로.
+/// 이름은 `create_new` 로 먼저 잡아 두므로 그 사이 다른 파일이 생겨도 덮어쓰지 않는다. 돌려주는 값 = 새 파일 경로.
+pub fn copy_into(file: &Path, dest: &Path) -> Result<PathBuf, String> {
+    let meta = std::fs::metadata(file).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("폴더는 붙여넣을 수 없습니다".into());
+    }
+    if !dest.is_dir() {
+        return Err("대상 폴더가 없습니다".into());
+    }
+    let name = file.file_name().ok_or("파일 이름 없음")?.to_string_lossy().into_owned();
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.clone(), String::new()),
+    };
+    for k in 0..1000 {
+        let candidate = match k {
+            0 => name.clone(),
+            1 => format!("{stem} 사본{ext}"),
+            _ => format!("{stem} 사본 {k}{ext}"),
+        };
+        let to = dest.join(&candidate);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&to) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+        // 잡아 둔 빈 파일(우리 것)에 내용을 채운다
+        let copied = std::fs::copy(file, &to);
+        if !matches!(copied, Ok(n) if n == meta.len()) {
+            let _ = std::fs::remove_file(&to);
+            return Err(copied.err().map_or("복사 크기가 맞지 않음".into(), |e| e.to_string()));
+        }
+        return Ok(to);
+    }
+    Err("빈 이름을 찾지 못함".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +168,23 @@ mod tests {
         std::fs::write(d.join("b.jpg"), b"new").unwrap();
         assert!(move_into(&d.join("b.jpg"), &g).is_err());
         assert_eq!(std::fs::read(&moved).unwrap(), b"bbb");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn copy_into_never_overwrites() {
+        let d = tmp("copy");
+        let src = d.join("a b.jpg");
+        std::fs::write(&src, b"12345").unwrap();
+        let sub = d.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        assert_eq!(copy_into(&src, &sub).unwrap(), sub.join("a b.jpg"));
+        // 같은 폴더에 붙이면 사본, 또 붙이면 사본 2
+        assert_eq!(copy_into(&src, &d).unwrap(), d.join("a b 사본.jpg"));
+        assert_eq!(copy_into(&src, &d).unwrap(), d.join("a b 사본 2.jpg"));
+        assert_eq!(std::fs::read(d.join("a b 사본 2.jpg")).unwrap(), b"12345");
+        assert_eq!(std::fs::read(&src).unwrap(), b"12345");
+        assert!(copy_into(&sub, &d).is_err(), "폴더는 거부");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

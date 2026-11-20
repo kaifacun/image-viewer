@@ -290,3 +290,48 @@ fn rotation_is_view_state_until_saved() {
     assert!(!v.handle(Action::RotateCw, &l).redraw);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// 일괄 회전·붙여넣기 결과 반영과 클립보드 요청 규칙
+#[test]
+fn batch_rotate_and_paste_results() {
+    use iv_viewer::{AppRequest, ClipOp, FileOp};
+    let (d, l, mut v) = setup("clip", 4);
+    let _ = v.open(&d, &l);
+    let dir = d.canonicalize().unwrap();
+    // 선택이 없으면 복사 요청 없음, 경로 복사는 폴더 경로
+    let _ = v.handle(Action::SelectNone, &l);
+    assert!(v.handle(Action::Copy, &l).app.is_none());
+    assert_eq!(v.handle(Action::CopyPath, &l).app, Some(AppRequest::Clipboard(ClipOp::CopyPath)));
+    assert_eq!(v.path_targets(), vec![dir.clone()]);
+    // 두 장 골라 일괄 회전 요청
+    let _ = v.handle(Action::Select(1), &l);
+    let _ = v.handle(Action::ToggleSelect(2), &l);
+    assert_eq!(v.handle(Action::Copy, &l).app, Some(AppRequest::Clipboard(ClipOp::Copy)));
+    let _ = v.handle(Action::RotateMarked(1), &l);
+    assert_eq!(v.take_file_op(), Some(FileOp::RotateMarked { quarters: 1 }));
+    // 회전 저장 결과: 파일이 바뀌면 id 가 바뀌지만 선택은 그대로 두 장
+    let targets = v.trash_targets();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    for p in &targets {
+        std::fs::write(p, std::fs::read(p).unwrap()).unwrap();
+    }
+    let fx = v.on_rotated(&targets, &[], &l);
+    assert!(fx.library_changed);
+    assert_eq!(v.trash_targets(), targets);
+    assert!(v.browse_status(None, "t").contains("2장 돌려 저장함"));
+    // 붙여넣기: 열린 폴더에 새 파일이 생기면 새로고침하고 그것들을 선택
+    let _ = v.handle(Action::Paste(None), &l);
+    assert_eq!(v.take_file_op(), Some(FileOp::Paste { dest: dir.clone() }));
+    let new = dir.join("img01 사본.png");
+    std::fs::copy(dir.join("img01.png"), &new).unwrap();
+    let _ = v.on_pasted(&dir, &[new.clone()], &[], &[], &l);
+    assert_eq!(v.library.len(), 5);
+    assert_eq!(v.trash_targets(), vec![new.clone()]);
+    // 잘라내기로 다른 폴더에 옮겼으면 목록에서 빠진다
+    let sub = dir.join("sub");
+    let moved = sub.join("img01 사본.png");
+    std::fs::rename(&new, &moved).unwrap();
+    let _ = v.on_pasted(&sub, &[moved], &[new], &[], &l);
+    assert_eq!(v.library.len(), 4);
+    let _ = std::fs::remove_dir_all(&d);
+}

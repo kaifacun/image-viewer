@@ -15,7 +15,7 @@ use iv_render::{EguiPaint, RenderOutcome, Renderer, Scene, UiCapability};
 use iv_scan::{ScanConfig, Scanner, Verdict};
 use iv_thumbs::{ThumbConfig, ThumbEvent, ThumbRequest, ThumbService};
 use iv_ui::browser::{BrowserModel, BrowserState};
-use iv_viewer::{Action, AppRequest, Effects, FileOp, Mode, ViewerConfig, ViewerState};
+use iv_viewer::{Action, AppRequest, ClipOp, Effects, FileOp, Mode, ViewerConfig, ViewerState};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -77,6 +77,9 @@ struct App {
     tree_dirty: bool,
     /// 사용자가 만들거나 이름을 바꾼 폴더 — 비어 있어도 숨기지 않는다
     keep_visible: HashSet<PathBuf>,
+    /// 잘라낸 파일들과 그때의 클립보드 변경 번호 — 붙여넣을 때 클립보드가 그대로면 옮기고, 아니면 복사
+    cut_paths: HashSet<PathBuf>,
+    cut_count: i64,
     /// 스캔 판정이 바뀜 — 다음 기회(초당 한 번, 누르고 있지 않을 때)에 다시 만든다
     tree_scan_changed: bool,
     /// 전체 보기 중 열린 폴더가 밖에서 바뀜 — 브라우저로 돌아오면 확인 (전체 보기 확대 상태를 깨지 않게)
@@ -147,6 +150,8 @@ impl App {
             tree_rows_at: None,
             tree_dirty: true,
             keep_visible: HashSet::new(),
+            cut_paths: HashSet::new(),
+            cut_count: 0,
             tree_scan_changed: false,
             browser: BrowserState::default(),
             thumb_failed: HashSet::new(),
@@ -209,6 +214,7 @@ impl App {
                 }
                 AppRequest::Trash => self.trash(el),
                 AppRequest::FileOp => self.file_op(el),
+                AppRequest::Clipboard(op) => self.clipboard(op, el),
             }
         }
         if fx.redraw || fx.window_changed || fx.library_changed || fx.reveal {
@@ -275,14 +281,17 @@ impl App {
     //#region 파일·폴더 작업 — 디스크 작업은 여기(iv-fsops·iv-rotate), 목록 반영은 뷰어, 트리 반영은 여기
     fn file_op(&mut self, el: &ActiveEventLoop) {
         let Some(op) = self.viewer.take_file_op() else { return };
-        if let FileOp::MoveTo { dest } = &op {
-            self.move_to(dest.clone(), el);
-            return;
+        match &op {
+            FileOp::MoveTo { dest } => return self.move_to(dest.clone(), el),
+            FileOp::RotateMarked { quarters } => return self.rotate_marked(*quarters, el),
+            FileOp::Paste { dest } => return self.paste(dest.clone(), el),
+            _ => {}
         }
         let target = match &op {
             FileOp::NewFolder { parent, .. } => parent.join("x"),
             FileOp::RenameFolder { path, .. } | FileOp::RenameFile { path, .. } | FileOp::Rotate { path, .. } => path.clone(),
-            FileOp::MoveTo { dest } => dest.clone(),
+            FileOp::MoveTo { dest } | FileOp::Paste { dest } => dest.clone(),
+            FileOp::RotateMarked { .. } => PathBuf::new(),
         };
         let result = if !self.selftest_allows(&target) {
             Err("시험 루트 밖".to_string())
@@ -291,7 +300,7 @@ impl App {
                 FileOp::NewFolder { parent, name } => iv_fsops::create_folder(parent, name),
                 FileOp::RenameFolder { path, name } | FileOp::RenameFile { path, name } => iv_fsops::rename(path, name),
                 FileOp::Rotate { path, quarters } => rotate_file(path, *quarters),
-                FileOp::MoveTo { .. } => Err("내부 오류".to_string()),
+                FileOp::MoveTo { .. } | FileOp::RotateMarked { .. } | FileOp::Paste { .. } => Err("내부 오류".to_string()),
             }
         };
         match (&op, &result) {
@@ -311,12 +320,121 @@ impl App {
             (FileOp::RenameFile { path, .. }, Ok(p)) => log::info!("이름 바꿈: {} → {}", path.display(), p.display()),
             (FileOp::Rotate { quarters, .. }, Ok(p)) => log::info!("돌려 저장 ({}°): {}", *quarters as u32 * 90, p.display()),
             (_, Err(e)) => log::warn!("파일 작업 실패: {e}"),
-            (FileOp::MoveTo { .. }, Ok(_)) => {}
+            (FileOp::MoveTo { .. } | FileOp::RotateMarked { .. } | FileOp::Paste { .. }, Ok(_)) => {}
         }
         self.tree_dirty = true;
         let fx = self.viewer.on_file_op(&op, &result, &self.loader);
         self.apply(fx, el);
     }
+    //#region 일괄 회전·클립보드
+    /// 선택한 사진들을 돌려 저장 (방향 태그만)
+    fn rotate_marked(&mut self, quarters: u8, el: &ActiveEventLoop) {
+        let (mut done, mut failures) = (Vec::new(), Vec::new());
+        for p in self.viewer.trash_targets() {
+            if !self.selftest_allows(&p) {
+                continue;
+            }
+            match rotate_file(&p, quarters) {
+                Ok(_) => done.push(p),
+                Err(e) => failures.push(format!("{} ({e})", file_name(&p))),
+            }
+        }
+        log::info!("일괄 회전 {}°: {}장, 실패 {}", quarters as u32 * 90, done.len(), failures.len());
+        let fx = self.viewer.on_rotated(&done, &failures, &self.loader);
+        self.apply(fx, el);
+    }
+
+    /// 자가 시험 중엔 시험용 클립보드 파일만 (사용자 클립보드를 덮지 않게)
+    fn clip_allowed(&self) -> Result<(), String> {
+        clip_ok(self.selftest.is_some())
+    }
+
+    fn write_clip_text(&self, t: &str) -> Result<i64, String> {
+        self.clip_allowed()?;
+        iv_clipboard::write_text(t)
+    }
+
+    fn clipboard(&mut self, op: ClipOp, el: &ActiveEventLoop) {
+        let result = match op {
+            ClipOp::Copy | ClipOp::Cut => {
+                let files = self.viewer.trash_targets();
+                let r = self.clip_allowed().and_then(|()| iv_clipboard::write_files(&files));
+                self.cut_paths.clear();
+                r.map(|count| {
+                    if op == ClipOp::Cut {
+                        self.cut_paths = files.iter().cloned().collect();
+                        self.cut_count = count;
+                        format!("{}장 잘라냄 — 옮길 폴더에서 ⌘V", files.len())
+                    } else {
+                        format!("{}장 복사함 — Finder 에도 붙여넣을 수 있음", files.len())
+                    }
+                })
+            }
+            ClipOp::CopyPath => {
+                let paths = self.viewer.path_targets();
+                let text = paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n");
+                self.write_clip_text(&text).map(|_| if paths.len() > 1 { format!("경로 {}개 복사함", paths.len()) } else { format!("경로 복사함: {text}") })
+            }
+        };
+        if let Err(e) = &result {
+            log::warn!("클립보드: {e}");
+        }
+        let fx = self.viewer.on_clipboard(result);
+        self.apply(fx, el);
+    }
+
+    /// 클립보드의 파일을 `dest` 에 — 이 앱에서 잘라낸 그대로면 옮기고, 아니면 복사 (덮어쓰지 않고 "사본" 이름)
+    fn paste(&mut self, dest: PathBuf, el: &ActiveEventLoop) {
+        let files = if self.clip_allowed().is_ok() { iv_clipboard::read_files() } else { Vec::new() };
+        let is_cut = !self.cut_paths.is_empty()
+            && iv_clipboard::change_count() == self.cut_count
+            && files.len() == self.cut_paths.len()
+            && files.iter().all(|f| self.cut_paths.contains(f));
+        let (mut created, mut moved_from, mut failures) = (Vec::new(), Vec::new(), Vec::new());
+        if files.is_empty() {
+            failures.push("클립보드에 파일이 없음".to_string());
+        }
+        if self.selftest_allows(&dest) {
+            for f in &files {
+                if !self.selftest_allows(f) {
+                    continue;
+                }
+                if is_cut && f.parent() == Some(dest.as_path()) {
+                    continue; // 같은 폴더로 옮기기 = 할 일 없음
+                }
+                let r = if is_cut { iv_fsops::move_into(f, &dest) } else { iv_fsops::copy_into(f, &dest) };
+                match r {
+                    Ok(to) => {
+                        if is_cut {
+                            moved_from.push(f.clone());
+                        }
+                        created.push(to);
+                    }
+                    Err(e) => failures.push(format!("{} ({e})", file_name(f))),
+                }
+            }
+        }
+        if is_cut {
+            self.cut_paths.clear();
+            // 옮긴 뒤엔 클립보드가 새 위치를 가리키게 (다시 ⌘V 하면 복사)
+            if !created.is_empty() && self.clip_allowed().is_ok() {
+                let _ = iv_clipboard::write_files(&created);
+            }
+        }
+        log::info!("붙여넣기 → {}: {}장 ({}), 실패 {}", dest.display(), created.len(), if is_cut { "옮김" } else { "복사" }, failures.len());
+        // 트리 숫자: 대상과 (옮겼으면) 원래 폴더
+        self.tree.invalidate(&dest);
+        for f in &moved_from {
+            if let Some(d) = f.parent() {
+                self.tree.invalidate(d);
+            }
+        }
+        self.tree_dirty = true;
+        let fx = self.viewer.on_pasted(&dest, &created, &moved_from, &failures, &self.loader);
+        self.apply(fx, el);
+    }
+    //#endregion
+
     /// 선택한 사진들을 폴더로 옮긴다 (같은 이름이 있으면 그 사진은 남기고 오류로 알린다)
     fn move_to(&mut self, dest: PathBuf, el: &ActiveEventLoop) {
         let targets = self.viewer.trash_targets();
@@ -535,6 +653,7 @@ impl App {
                 sort: lib.sort_order(),
                 failed: &self.thumb_failed,
                 scan_status: &scan_status,
+                cut: &self.cut_paths,
                 preview_has_frame: self.viewer.shown.as_ref().is_some_and(|s| Some(s.key) == cur),
             };
             let browser = &mut self.browser;
@@ -567,6 +686,10 @@ impl App {
                 g.window.request_redraw();
             }
             ui_actions.extend(b.actions);
+            if let Some(t) = b.copy_text {
+                let r = clip_ok(self.selftest.is_some()).and_then(|()| iv_clipboard::write_text(&t)).map(|_| format!("경로 복사함: {t}"));
+                let _ = self.viewer.on_clipboard(r);
+            }
             let window = g.window.clone();
             self.after_browser(b.tree_toggle, b.visible, b.preview_rect.map(|r| [r.min.x * ppp, r.min.y * ppp, r.max.x * ppp, r.max.y * ppp]), b.grid_cols, b.grid_rows_visible, &window);
         }
@@ -678,9 +801,10 @@ impl App {
                     }
                 }
                 Step::Capture(path) => self.frame(el, Some(path)),
-                Step::Click(x, y) | Step::DoubleClick(x, y) => {
+                Step::Click(x, y) | Step::DoubleClick(x, y) | Step::RightClick(x, y) => {
                     let pos = egui::pos2(x, y);
-                    let press = |p: bool| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: p, modifiers: none };
+                    let button = if matches!(step, Step::RightClick(..)) { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
+                    let press = |p: bool| egui::Event::PointerButton { pos, button, pressed: p, modifiers: none };
                     self.injected.push_back(vec![egui::Event::PointerMoved(pos)]);
                     self.injected.push_back(vec![press(true), press(false)]);
                     if matches!(step, Step::DoubleClick(..)) {
@@ -1058,4 +1182,16 @@ fn rotate_file(path: &std::path::Path, quarters: u8) -> Result<PathBuf, String> 
     let current = iv_rotate::read_orientation(path).ok_or("사진 방향을 읽지 못함")?;
     iv_rotate::save_orientation(path, current.rotated_quarters(quarters))?;
     Ok(path.to_path_buf())
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+/// 자가 시험 중엔 시험용 클립보드 파일만 (사용자 클립보드를 덮지 않게)
+fn clip_ok(selftest: bool) -> Result<(), String> {
+    if selftest && std::env::var_os("IV_CLIPBOARD_FILE").is_none() {
+        return Err("자가 시험: IV_CLIPBOARD_FILE 없이 클립보드를 쓰지 않음".into());
+    }
+    Ok(())
 }
