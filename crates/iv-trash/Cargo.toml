@@ -1,0 +1,12 @@
+[package]
+name = "iv-trash"
+description = "파일을 OS 휴지통으로 보낸다 (되돌릴 수 있는 삭제) — macOS NSFileManager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSFileManager", "NSURL", "NSError", "NSString"] }

@@ -27,6 +27,7 @@ fn main() {
         return;
     }
     let registry = decoders::build_registry();
+    log::info!("KaiIV {} 시작", env!("CARGO_PKG_VERSION"));
     log::info!("디코더: {:?}", registry.names());
 
     if let Some(out) = &args.render_to {

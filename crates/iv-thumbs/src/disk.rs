@@ -22,11 +22,11 @@ pub fn default_cache_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(d));
     }
     if cfg!(target_os = "macos") {
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches/iv"))
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Caches/KaiIV"))
     } else if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA").map(|h| PathBuf::from(h).join("iv").join("cache"))
+        std::env::var_os("LOCALAPPDATA").map(|h| PathBuf::from(h).join("KaiIV").join("cache"))
     } else {
-        std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache"))).map(|p| p.join("iv"))
+        std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache"))).map(|p| p.join("kaiiv"))
     }
 }
 

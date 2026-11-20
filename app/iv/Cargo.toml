@@ -1,12 +1,12 @@
 [package]
 name = "iv"
-description = "빠른 이미지 뷰어 — 유일한 조립 지점"
+description = "KaiIV — 빠른 이미지 뷰어 (유일한 조립 지점)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "iv"
+name = "kaiiv"
 path = "src/main.rs"
 
 [dependencies]
@@ -23,6 +23,7 @@ iv-render-cpu.workspace = true
 iv-ui.workspace = true
 iv-thumbs.workspace = true
 iv-fstree.workspace = true
+iv-trash.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
 winit.workspace = true

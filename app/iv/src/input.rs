@@ -5,9 +5,18 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode) -> Option<Action> {
     let cmd = mods.super_key() || mods.control_key();
+    let shift = mods.shift_key();
     match key {
         Key::Named(n) => match (mode, n) {
             (_, NamedKey::Escape) if fullscreen => Some(Action::ToggleFullscreen),
+            // 휴지통: ⌘⌫ (Finder 와 같음) · 앞으로 지우기(Delete) — 그냥 ⌫(상위 폴더·이전 장)보다 먼저 본다
+            (_, NamedKey::Backspace) if cmd => Some(Action::Trash),
+            (_, NamedKey::Delete) => Some(Action::Trash),
+            // 브라우저: ⇧+화살표 = 선택 범위 넓히기
+            (Mode::Browse, NamedKey::ArrowRight) if shift => Some(Action::GridExtend { dx: 1, dy: 0 }),
+            (Mode::Browse, NamedKey::ArrowLeft) if shift => Some(Action::GridExtend { dx: -1, dy: 0 }),
+            (Mode::Browse, NamedKey::ArrowDown) if shift => Some(Action::GridExtend { dx: 0, dy: 1 }),
+            (Mode::Browse, NamedKey::ArrowUp) if shift => Some(Action::GridExtend { dx: 0, dy: -1 }),
             // 브라우저: 격자 이동
             (Mode::Browse, NamedKey::ArrowRight) => Some(Action::GridMove { dx: 1, dy: 0 }),
             (Mode::Browse, NamedKey::ArrowLeft) => Some(Action::GridMove { dx: -1, dy: 0 }),
@@ -29,6 +38,7 @@ pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode)
         Key::Character(c) => match (c.as_str(), cmd, mode) {
             ("q" | "w", true, _) => Some(Action::Quit),
             ("r", true, _) => Some(Action::Refresh),
+            ("a", true, Mode::Browse) => Some(Action::SelectAll),
             ("f", false, _) => Some(Action::ToggleFullscreen),
             ("=" | "+", _, Mode::View) => Some(Action::ZoomIn),
             ("-" | "_", _, Mode::View) => Some(Action::ZoomOut),
@@ -57,6 +67,7 @@ pub fn named(name: &str) -> Option<Key> {
         "pageup" => NamedKey::PageUp,
         "pagedown" => NamedKey::PageDown,
         "space" => NamedKey::Space,
+        "delete" => NamedKey::Delete,
         _ => return None,
     }))
 }

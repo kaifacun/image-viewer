@@ -190,6 +190,15 @@ impl Library {
         }
     }
 
+    /// 여러 항목을 한꺼번에 뺀다 (휴지통 이동 후). 현재 위치는 지운 것 중 첫 자리에 남은 항목
+    /// (Finder 처럼 "다음 장"), 끝을 넘으면 마지막 항목. 하나라도 뺐으면 true.
+    pub fn remove_ids(&mut self, ids: &HashSet<EntryId>) -> bool {
+        let Some(first) = self.entries.iter().position(|e| ids.contains(&e.id)) else { return false };
+        self.entries.retain(|e| !ids.contains(&e.id));
+        self.index = first.min(self.entries.len().saturating_sub(1));
+        true
+    }
+
     /// 현재 위치 기준 이웃: (앞으로 n개, 뒤로 m개) — 가까운 순
     pub fn neighbors(&self, ahead: usize, behind: usize) -> (Vec<&Entry>, Vec<&Entry>) {
         let a = (1..=ahead).filter_map(|k| self.entries.get(self.index + k)).collect();
@@ -262,6 +271,24 @@ mod tests {
         assert_eq!(b.len(), 2);
         assert_eq!(b[0].name, "x2.jpg");
         assert!(!l.step(10) || l.index() == 4);
+    }
+
+    #[test]
+    fn remove_ids_lands_on_next_survivor() {
+        let es: Vec<Entry> = (0..6).map(|i| Entry::from_path(PathBuf::from(format!("/tmp/r{i}.jpg")))).collect();
+        let ids: Vec<EntryId> = es.iter().map(|e| e.id).collect();
+        let mut l = Library::from_entries(es);
+        l.go_to(4);
+        // r1, r2 삭제 → 첫 삭제 자리(1)에 r3
+        assert!(l.remove_ids(&HashSet::from([ids[1], ids[2]])));
+        assert_eq!(l.current().unwrap().name, "r3.jpg");
+        // 마지막 두 장 삭제 → 끝으로 당겨짐
+        assert!(l.remove_ids(&HashSet::from([ids[4], ids[5]])));
+        assert_eq!(l.current().unwrap().name, "r3.jpg");
+        assert!(!l.remove_ids(&HashSet::from([ids[1]])));
+        // 전부 삭제 → 빈 목록
+        assert!(l.remove_ids(&HashSet::from([ids[0], ids[3]])));
+        assert!(l.is_empty() && l.current().is_none());
     }
 
     #[test]

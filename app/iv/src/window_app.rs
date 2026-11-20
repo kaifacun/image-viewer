@@ -26,6 +26,9 @@ use crate::args::{Args, RendererLevel};
 use crate::selftest::{SelfTest, Step};
 use crate::{input, renderer};
 
+/// 창 제목·정보 창에 보이는 앱 이름과 버전 (워크스페이스 version 하나가 진실)
+const APP: &str = concat!("KaiIV ", env!("CARGO_PKG_VERSION"));
+
 /// 백그라운드 → 메인 스레드 신호
 #[derive(Debug, Clone, Copy)]
 pub enum UserEvent {
@@ -160,6 +163,7 @@ impl App {
                         g.window.set_fullscreen(if fs { None } else { Some(Fullscreen::Borderless(None)) });
                     }
                 }
+                AppRequest::Trash => self.trash(el),
             }
         }
         if fx.redraw || fx.window_changed || fx.library_changed || fx.reveal {
@@ -169,6 +173,39 @@ impl App {
             }
         }
     }
+
+    //#region 휴지통 — 뷰어가 고른 파일을 OS 휴지통으로, 성공한 것만 목록에서 뺀다
+    fn trash(&mut self, el: &ActiveEventLoop) {
+        let mut targets = self.viewer.trash_targets();
+        // 자가 시험은 시험 루트(IV_TREE_ROOTS) 안의 파일만 지울 수 있다 — 사용자 파일 보호
+        if self.selftest.is_some() {
+            let roots: Vec<PathBuf> = std::env::var_os("IV_TREE_ROOTS")
+                .map(|v| std::env::split_paths(&v).filter_map(|p| p.canonicalize().ok()).collect())
+                .unwrap_or_default();
+            targets.retain(|p| {
+                let ok = std::env::var_os("IV_TRASH_DIR").is_some() && roots.iter().any(|r| p.starts_with(r));
+                if !ok {
+                    log::warn!("자가 시험: 시험 루트 밖 파일은 지우지 않음 {}", p.display());
+                }
+                ok
+            });
+        }
+        let (mut moved, mut failures) = (Vec::new(), Vec::new());
+        for p in targets {
+            match iv_trash::trash(&p) {
+                Ok(()) => moved.push(p),
+                Err(e) => {
+                    log::warn!("휴지통 이동 실패 {}: {e}", p.display());
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    failures.push(format!("{name} ({e})"));
+                }
+            }
+        }
+        log::info!("휴지통: {}개 이동, {}개 실패", moved.len(), failures.len());
+        let fx = self.viewer.on_trashed(&moved, &failures, &self.loader);
+        self.apply(fx, el);
+    }
+    //#endregion
 
     /// 창이 있는 모니터의 긴 변 (물리 픽셀)
     fn monitor_side(&self) -> Option<u32> {
@@ -205,12 +242,12 @@ impl App {
     fn update_title(&mut self) {
         let Some(g) = &self.gfx else { return };
         let title = match (self.viewer.mode, self.viewer.current()) {
-            (Mode::View, Some(e)) => format!("{} — iv", e.name),
+            (Mode::View, Some(e)) => format!("{} — {APP}", e.name),
             (Mode::Browse, _) => match self.viewer.library.dir() {
-                Some(d) => format!("{} — iv", iv_fstree::display_name(d)),
-                None => "iv".to_string(),
+                Some(d) => format!("{} — {APP}", iv_fstree::display_name(d)),
+                None => APP.to_string(),
             },
-            _ => "iv".to_string(),
+            _ => APP.to_string(),
         };
         // UI 를 못 그리는 렌더러(CPU)는 상태 전체를 제목에 싣는다
         let title = if g.renderer.ui_capability() == UiCapability::StatusOnly { self.status() } else { title };
@@ -238,6 +275,7 @@ impl App {
         if let Some(g) = &self.gfx {
             self.info_rows.push(("렌더러".into(), g.renderer.name().to_string()));
         }
+        self.info_rows.push(("버전".into(), APP.to_string()));
     }
 
     /// 한 프레임: UI → 장면 → 렌더 (또는 캡처). redraw 와 자가 시험 캡처가 같은 길을 쓴다.
@@ -316,6 +354,7 @@ impl App {
             let model = BrowserModel {
                 entries: lib.entries(),
                 selected: (!lib.is_empty()).then(|| lib.index()),
+                marked: self.viewer.marked(),
                 dir: lib.dir(),
                 tree: &tree_rows,
                 status,
@@ -457,6 +496,20 @@ impl App {
                     }
                     return Some(Instant::now() + Duration::from_millis(16));
                 }
+                //#region 수식키 클릭 — egui 는 수식키를 ModifiersChanged 이벤트로 안다
+                Step::ModClick(x, y, cmd, shift) => {
+                    let pos = egui::pos2(x, y);
+                    let mods = egui::Modifiers { command: cmd, mac_cmd: cmd, shift, ..Default::default() };
+                    let press = |p: bool| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: p, modifiers: mods };
+                    self.injected.push_back(vec![egui::Event::ModifiersChanged(mods), egui::Event::PointerMoved(pos)]);
+                    self.injected.push_back(vec![press(true), press(false)]);
+                    self.injected.push_back(vec![egui::Event::ModifiersChanged(none)]);
+                    if let Some(g) = &self.gfx {
+                        g.window.request_redraw();
+                    }
+                    return Some(Instant::now() + Duration::from_millis(16));
+                }
+                //#endregion
                 Step::Scroll(x, y, dy) => {
                     let pos = egui::pos2(x, y);
                     self.injected.push_back(vec![egui::Event::PointerMoved(pos)]);
@@ -565,7 +618,8 @@ impl ApplicationHandler<UserEvent> for App {
         if self.gfx.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title("iv").with_inner_size(LogicalSize::new(1280.0, 820.0));
+        // 자가 시험 창은 포커스를 빼앗지 않는다 (사용자가 다른 앱에서 치는 키가 들어오지 않게)
+        let attrs = Window::default_attributes().with_title(APP).with_inner_size(LogicalSize::new(1280.0, 820.0)).with_active(self.selftest.is_none());
         let window = Arc::new(el.create_window(attrs).expect("창 생성 실패"));
         let (renderer, level) = renderer::create(&window, self.args.renderer);
         let egui = make_egui(&window, renderer.as_ref());
@@ -621,6 +675,14 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        //#region 자가 시험 중엔 실제 키보드·마우스를 무시 — 창이 포커스를 가져가 사용자의 타자(⌫ 등)가 새어 들어오지 않게
+        if self.selftest.is_some()
+            && matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::DroppedFile(_))
+        {
+            log::debug!("자가 시험: 실제 입력 무시 {event:?}");
+            return;
+        }
+        //#endregion
         // 버튼 놓기·커서 이탈은 egui 가 소비해도 드래그를 끝낸다 (드래그가 붙어 버리는 것 방지)
         if matches!(event, WindowEvent::MouseInput { state: ElementState::Released, .. } | WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false)) {
             self.dragging = None;
@@ -660,7 +722,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
                 if let Some(a) = input::key_action(&event.logical_key, self.mods, fullscreen, self.viewer.mode) {
-                    self.handle(a, el);
+                    // 키를 누르고 있어도 휴지통은 한 번만 (반복 입력이 다음 장을 연달아 지우지 않게)
+                    if !(event.repeat && a == Action::Trash) {
+                        self.handle(a, el);
+                    }
                 }
             }
             // 브라우저에서는 마우스를 egui(격자 스크롤·클릭)가 맡는다 — 앱의 확대·이동 매핑은 전체 보기에서만
@@ -668,19 +733,15 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. } | WindowEvent::MouseInput { .. } if browse => {}
             WindowEvent::MouseWheel { delta, .. } => {
                 let anchor = [self.cursor.x as f32, self.cursor.y as f32];
-                let a = match delta {
-                    // 마우스 휠: 커서 기준 확대/축소
-                    MouseScrollDelta::LineDelta(_, y) => Action::ZoomBy { factor: 1.15f32.powf(y), anchor },
-                    // 트랙패드: ⌘/Ctrl 이면 확대, 아니면 이동
-                    MouseScrollDelta::PixelDelta(p) => {
-                        if self.mods.super_key() || self.mods.control_key() {
-                            Action::ZoomBy { factor: (1.0 + p.y as f32 * 0.005).clamp(0.5, 2.0), anchor }
-                        } else {
-                            Action::Pan([p.x as f32, p.y as f32])
-                        }
-                    }
+                // 휠은 언제나 커서 기준 확대/축소. 맥의 부드러운 스크롤 마우스(Magic Mouse 등)는 픽셀 단위로 오므로
+                // 그것도 확대로 받는다 — 이동은 끌기로 한다.
+                let factor = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => 1.15f32.powf(y),
+                    MouseScrollDelta::PixelDelta(p) => (p.y as f32 * 0.003).exp().clamp(0.5, 2.0),
                 };
-                self.handle(a, el);
+                if factor != 1.0 {
+                    self.handle(Action::ZoomBy { factor, anchor }, el);
+                }
             }
             WindowEvent::PinchGesture { delta, .. } => {
                 let anchor = [self.cursor.x as f32, self.cursor.y as f32];

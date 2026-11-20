@@ -1,4 +1,4 @@
-# iv (빠른 이미지 뷰어) — 프로젝트 지식
+# KaiIV (빠른 이미지 뷰어, 실행 파일 `kaiiv`) — 프로젝트 지식
 
 ## 환경
 - Rust 는 rustup 으로 `~/.cargo` 에 설치(`--no-modify-path`) → 셸에서 `export PATH="$HOME/.cargo/bin:$PATH"` 필요.
@@ -39,7 +39,9 @@
 - ImageIO 내장 미리보기는 RAW·HEIF 에서만 쓴다. JPEG 은 내장 썸네일이 없으면 원본 전체를 디코드한다(6016px 645ms).
 - 디코드 목표 크기는 창이 아니라 **모니터 긴 변**(`ViewerConfig.display_side`) — 창 크기 조절·전체 화면 때 재디코드 폭주 방지.
 - 브라우저 시험은 반드시 `IV_CACHE_DIR=scratch/cache IV_TREE_ROOTS=scratch` 로 (사용자 홈·사진이 트리/썸네일 캐시에 들어가지 않게). 인자 없는 실행은 홈을 연다 — 시험에 쓰지 않는다. `IV_START_DIR` 로 시작 폴더 지정.
-- 자가 시험 실입력: `click=x,y` `dblclick=x,y` `scroll=x,y,dy`(점 좌표, egui 맞음 판정 경유), `key=right|enter|escape…`(단축키 표 경유), `wait-thumbs:ms`, `act:folder=|select=|activate=|sort=size,desc|view|browse`.
+- **자가 시험 창은 포커스를 뺏지 않고(`with_active(false)`) 실제 키보드·마우스를 무시한다** — 예전엔 사용자가 터미널에서 친 ⌫ 가 시험 창에 들어가 상위 폴더로 올라간 뒤 사용자 파일을 지웠다. 휴지통 시험은 `IV_TRASH_DIR=scratch/trash-bin` + 사본 폴더(`scratch/trash-test`)로만, 시험 중 휴지통은 `IV_TREE_ROOTS` 밖 파일을 거부한다.
+- 휴지통은 `iv-trash`(NSFileManager `trashItemAtURL`). 실패 시 `remove_file` 로 대체 금지.
+- 자가 시험 실입력: `click=x,y` `dblclick=x,y` `cmdclick:x,y` `shiftclick:x,y`(egui ModifiersChanged 주입) `scroll=x,y,dy`(점 좌표, egui 맞음 판정 경유), `key=right|enter|escape…`(단축키 표 경유), `wait-thumbs:ms`, `act:folder=|select=|activate=|toggle=|range=|selectall|trash|sort=size,desc|view|browse`.
 - 화면 검증: 앱 자가 캡처(IV_SELFTEST) 또는 `tools/winid.swift` 로 iv 창 ID 를 얻어 `screencapture -l <id>` (창 단위만).
 
 ## 대표 여정 (시나리오 검수)

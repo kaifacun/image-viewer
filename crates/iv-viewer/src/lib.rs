@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use iv_core::Frame;
 pub use iv_library::SortKey;
-use iv_library::{Entry, Library};
+use iv_library::{Entry, EntryId, Library};
 use iv_pipeline::{LoadEvent, Loader, Quality, Want, Window};
 use iv_viewport::{Viewport, ZoomMode};
 
@@ -55,6 +55,17 @@ pub enum Action {
     ParentFolder,
     Refresh,
     Sort(SortKey, bool),
+    // ── 여러 장 선택·삭제 ──
+    /// ⌘+클릭: 이 항목을 선택에 넣거나 뺀다
+    ToggleSelect(usize),
+    /// ⇧+클릭: 기준 항목부터 여기까지 선택
+    RangeSelect(usize),
+    /// ⇧+화살표: 선택 범위를 늘리며 이동
+    GridExtend { dx: isize, dy: isize },
+    /// ⌘A
+    SelectAll,
+    /// 선택한 항목(전체 보기에선 보고 있는 장)을 휴지통으로 — 실제 이동은 앱이 한다
+    Trash,
 }
 
 /// 화면 모드
@@ -71,6 +82,8 @@ pub enum Mode {
 pub enum AppRequest {
     ToggleFullscreen,
     Quit,
+    /// [`ViewerState::trash_targets`] 를 휴지통으로 보내고 [`ViewerState::on_trashed`] 로 알려 달라
+    Trash,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -151,6 +164,10 @@ pub struct ViewerState {
     pub config: ViewerConfig,
     generation: u64,
     extensions: HashSet<&'static str>,
+    /// 브라우저에서 선택된 항목들 (정렬해도 유지되게 id 로). 평범한 이동은 현재 항목 하나로 되돌린다.
+    marked: HashSet<EntryId>,
+    /// ⇧ 범위 선택의 기준 항목
+    anchor: Option<EntryId>,
 }
 
 const ZOOM_STEP: f32 = 1.25;
@@ -171,6 +188,8 @@ impl ViewerState {
             config,
             generation: 0,
             extensions,
+            marked: HashSet::new(),
+            anchor: None,
         }
     }
 
@@ -254,6 +273,8 @@ impl ViewerState {
                 if (is_dir || !path.exists()) && self.mode == Mode::Browse && self.browse_available {
                     // 트리는 새 폴더를 가리키는데 격자가 옛 폴더를 보이지 않게 비운다
                     self.library = Library::empty_at(path.to_path_buf());
+                    self.marked.clear();
+                    self.anchor = None;
                     self.shown = None;
                     self.generation += 1;
                     let mut fx = Effects::nav();
@@ -276,7 +297,14 @@ impl ViewerState {
             lib.go_to(i);
         }
         self.library = lib;
+        let (marked, anchor) = (std::mem::take(&mut self.marked), self.anchor);
         let mut fx = self.after_navigation(loader).with_reveal();
+        // 새로고침 뒤에도 남아 있는 항목의 선택은 유지
+        let alive: HashSet<EntryId> = self.library.entries().iter().map(|e| e.id).filter(|id| marked.contains(id)).collect();
+        if !alive.is_empty() {
+            self.marked = alive;
+            self.anchor = anchor.filter(|a| self.marked.contains(a));
+        }
         fx.library_changed = true;
         fx
     }
@@ -301,6 +329,10 @@ impl ViewerState {
         self.generation += 1;
         self.error = None;
         self.shown = None;
+        // 평범한 이동 = 현재 항목 하나만 선택
+        self.marked.clear();
+        self.anchor = self.current_key().map(EntryId);
+        self.marked.extend(self.anchor);
         if let Some(key) = self.current_key() {
             if let Some((frame, _)) = loader.cached(key, Some(self.screen_side())) {
                 let quality = if frame.is_preview { Quality::Preview } else { Quality::Decoded };
@@ -337,9 +369,9 @@ impl ViewerState {
                 self.mode = Mode::Browse;
                 Effects::nav().with_reveal()
             }
-            Action::Select(i) => self.go(i, loader),
+            Action::Select(i) => self.select_only(i, loader),
             Action::Activate(i) => {
-                let fx = self.go(i, loader);
+                let fx = self.select_only(i, loader);
                 fx.merge(self.enter_view())
             }
             Action::GridMove { dx, dy } => {
@@ -402,8 +434,108 @@ impl ViewerState {
             }
             Action::ToggleFullscreen => Effects { app: Some(AppRequest::ToggleFullscreen), ..Default::default() },
             Action::Quit => Effects { app: Some(AppRequest::Quit), ..Default::default() },
+            Action::ToggleSelect(i) if self.mode == Mode::Browse => self.toggle_select(i, loader),
+            Action::RangeSelect(i) if self.mode == Mode::Browse => self.range_select(i, loader),
+            Action::GridExtend { dx, dy } if self.mode == Mode::Browse && !self.library.is_empty() => {
+                let cols = self.grid_cols.max(1) as isize;
+                let n = self.library.len() as isize;
+                let i = (self.library.index() as isize + dx + dy * cols).clamp(0, n - 1) as usize;
+                self.range_select(i, loader).with_reveal()
+            }
+            Action::SelectAll if self.mode == Mode::Browse => {
+                self.marked = self.library.entries().iter().map(|e| e.id).collect();
+                Effects::redraw()
+            }
+            Action::ToggleSelect(_) | Action::RangeSelect(_) | Action::GridExtend { .. } | Action::SelectAll => Effects::default(),
+            Action::Trash => {
+                if self.trash_targets().is_empty() {
+                    return Effects::default();
+                }
+                Effects { app: Some(AppRequest::Trash), ..Default::default() }
+            }
         }
     }
+
+    //#region 여러 장 선택
+    /// 선택된 항목 id (그리기용)
+    pub fn marked(&self) -> &HashSet<EntryId> {
+        &self.marked
+    }
+
+    /// 클릭: 이 항목 하나만 선택 (이미 현재 항목이어도 여러 장 선택을 풀어야 한다)
+    fn select_only(&mut self, i: usize, loader: &Loader) -> Effects {
+        let fx = self.go(i, loader);
+        if fx.redraw {
+            return fx;
+        }
+        let Some(id) = self.library.get(i).map(|e| e.id) else { return fx };
+        if self.marked.len() == 1 && self.marked.contains(&id) {
+            return fx;
+        }
+        self.marked = HashSet::from([id]);
+        self.anchor = Some(id);
+        Effects::redraw()
+    }
+
+    /// 선택을 지키면서 현재 항목만 옮긴다 (미리보기가 따라감)
+    fn go_keep_marks(&mut self, i: usize, loader: &Loader) -> Effects {
+        let (marked, anchor) = (std::mem::take(&mut self.marked), self.anchor);
+        let fx = self.go(i, loader);
+        self.marked = marked;
+        self.anchor = anchor;
+        fx.merge(Effects::redraw())
+    }
+
+    fn toggle_select(&mut self, i: usize, loader: &Loader) -> Effects {
+        let Some(id) = self.library.get(i).map(|e| e.id) else { return Effects::default() };
+        let fx = self.go_keep_marks(i, loader);
+        if !self.marked.remove(&id) {
+            self.marked.insert(id);
+        }
+        self.anchor = Some(id);
+        fx
+    }
+
+    fn range_select(&mut self, i: usize, loader: &Loader) -> Effects {
+        if i >= self.library.len() {
+            return Effects::default();
+        }
+        let a = self.anchor.and_then(|a| self.library.position(a)).unwrap_or(self.library.index());
+        let fx = self.go_keep_marks(i, loader);
+        let (lo, hi) = (a.min(i), a.max(i));
+        self.marked = self.library.entries()[lo..=hi].iter().map(|e| e.id).collect();
+        fx
+    }
+    //#endregion
+
+    //#region 휴지통
+    /// 휴지통으로 보낼 파일: 전체 보기는 보고 있는 장만, 브라우저는 선택된 항목(목록 순서)
+    pub fn trash_targets(&self) -> Vec<PathBuf> {
+        let current = || self.library.current().and_then(|e| e.path()).map(Path::to_path_buf).into_iter().collect();
+        if self.mode == Mode::View || self.marked.is_empty() {
+            return current();
+        }
+        self.library.entries().iter().filter(|e| self.marked.contains(&e.id)).filter_map(|e| e.path().map(Path::to_path_buf)).collect()
+    }
+
+    /// 앱이 휴지통으로 보낸 결과 반영: 성공한 것만 목록에서 빼고, 실패는 오류로 보여준다
+    pub fn on_trashed(&mut self, removed: &[PathBuf], failures: &[String], loader: &Loader) -> Effects {
+        let ids: HashSet<EntryId> = self.library.entries().iter().filter(|e| e.path().is_some_and(|p| removed.iter().any(|r| r == p))).map(|e| e.id).collect();
+        let mut fx = Effects::redraw();
+        if self.library.remove_ids(&ids) {
+            fx = self.after_navigation(loader).with_reveal();
+            fx.library_changed = true;
+            if self.library.is_empty() && self.mode == Mode::View && self.browse_available {
+                self.mode = Mode::Browse;
+            }
+        }
+        // after_navigation 이 오류를 지우므로 그 뒤에 쓴다
+        if !failures.is_empty() {
+            self.error = Some(format!("휴지통으로 못 옮김 {}개: {}", failures.len(), failures[0]));
+        }
+        fx
+    }
+    //#endregion
 
     fn enter_view(&mut self) -> Effects {
         if self.mode == Mode::View || self.library.current().is_none() {
@@ -478,6 +610,10 @@ impl ViewerState {
     pub fn browse_status(&self, selected_size: Option<[u32; 2]>, renderer: &str) -> String {
         let lib = &self.library;
         let mut s = format!("폴더 {}개  ·  파일 {}개 ({})", lib.subdir_count(), lib.len(), human_bytes(lib.total_bytes()));
+        if self.marked.len() > 1 {
+            let bytes: u64 = lib.entries().iter().filter(|e| self.marked.contains(&e.id)).map(|e| e.len).sum();
+            s += &format!("  ·  {}장 선택 ({})", self.marked.len(), human_bytes(bytes));
+        }
         if let Some(e) = lib.current() {
             s += &format!("  ·  선택 {}/{}: {}", lib.index() + 1, lib.len(), e.name);
             if let Some([w, h]) = selected_size.or_else(|| self.shown.as_ref().filter(|x| Some(x.key) == self.current_key()).map(|x| x.frame.display_full_size())) {

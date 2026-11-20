@@ -20,6 +20,8 @@ pub enum Step {
     /// 실입력 주입 (점 좌표) — egui 의 맞음 판정·가려짐까지 거친다
     Click(f32, f32),
     DoubleClick(f32, f32),
+    /// 수식키를 누른 채 클릭 (cmd, shift)
+    ModClick(f32, f32, bool, bool),
     /// 커서 위치에서 휠 (점, 양수 = 내용이 아래로 → 위쪽이 보임)
     Scroll(f32, f32, f32),
     /// 키 입력 (앱 단축키 표를 거친다): left/right/up/down/enter/escape/backspace/home/end/pageup/pagedown
@@ -71,10 +73,15 @@ fn parse(t: &str) -> Option<Step> {
             let (w, h) = v.split_once('x')?;
             Step::Resize(w.parse().ok()?, h.parse().ok()?)
         }
-        "click" | "dblclick" => {
+        "click" | "dblclick" | "cmdclick" | "shiftclick" => {
             let (x, y) = v.split_once(',')?;
             let (x, y) = (x.trim().parse().ok()?, y.trim().parse().ok()?);
-            if k == "click" { Step::Click(x, y) } else { Step::DoubleClick(x, y) }
+            match k {
+                "click" => Step::Click(x, y),
+                "dblclick" => Step::DoubleClick(x, y),
+                "cmdclick" => Step::ModClick(x, y, true, false),
+                _ => Step::ModClick(x, y, false, true),
+            }
         }
         "scroll" => {
             let p: Vec<f32> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
@@ -98,6 +105,8 @@ fn parse(t: &str) -> Option<Step> {
             "browse" => Action::ExitView,
             "parent" => Action::ParentFolder,
             "refresh" => Action::Refresh,
+            "selectall" => Action::SelectAll,
+            "trash" => Action::Trash,
             other => {
                 if let Some(p) = other.strip_prefix("pan=") {
                     let (x, y) = p.split_once(',')?;
@@ -110,6 +119,10 @@ fn parse(t: &str) -> Option<Step> {
                     Action::OpenFolder(PathBuf::from(p))
                 } else if let Some(i) = other.strip_prefix("select=") {
                     Action::Select(i.parse().ok()?)
+                } else if let Some(i) = other.strip_prefix("toggle=") {
+                    Action::ToggleSelect(i.parse().ok()?)
+                } else if let Some(i) = other.strip_prefix("range=") {
+                    Action::RangeSelect(i.parse().ok()?)
                 } else if let Some(i) = other.strip_prefix("activate=") {
                     Action::Activate(i.parse().ok()?)
                 } else if let Some(k) = other.strip_prefix("sort=") {

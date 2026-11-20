@@ -11,7 +11,7 @@ use std::sync::Arc;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2};
 use iv_core::Frame;
 use iv_fstree::Row;
-use iv_library::Entry;
+use iv_library::{Entry, EntryId};
 use iv_viewer::{Action, SortKey};
 
 /// 썸네일 GPU 텍스처 묶음 (바이트 목표치 — 보이는 것 + 여유를 밑돌지 않음, 보이는 범위 밖부터 해제).
@@ -131,7 +131,10 @@ pub const TILE_MAX: f32 = 200.0;
 /// 브라우저가 그릴 내용
 pub struct BrowserModel<'a> {
     pub entries: &'a [Entry],
+    /// 현재 항목 (미리보기·키보드 기준)
     pub selected: Option<usize>,
+    /// 여러 장 선택 (현재 항목 포함)
+    pub marked: &'a HashSet<EntryId>,
     pub dir: Option<&'a Path>,
     pub tree: &'a [Row],
     pub status: &'a str,
@@ -212,8 +215,17 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
                 out.actions.push(Action::Refresh);
             }
             ui.separator();
+            if ui.add_enabled(m.selected.is_some(), egui::Button::new(trash_label(m))).clicked() {
+                out.actions.push(Action::Trash);
+            }
+            ui.separator();
             if ui.button("끝내기  ⌘Q").clicked() {
                 out.actions.push(Action::Quit);
+            }
+        });
+        ui.menu_button("편집", |ui| {
+            if ui.add_enabled(!m.entries.is_empty(), egui::Button::new("모두 선택  ⌘A")).clicked() {
+                out.actions.push(Action::SelectAll);
             }
         });
         ui.menu_button("보기", |ui| {
@@ -229,6 +241,14 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
         });
         ui.menu_button("정렬", |ui| sort_items(ui, m, out));
     });
+}
+
+/// "휴지통으로 이동" — 여러 장이면 장 수를 붙인다
+fn trash_label(m: &BrowserModel<'_>) -> String {
+    match m.marked.len() {
+        n if n > 1 => format!("휴지통으로 이동 ({n}장)  ⌘⌫"),
+        _ => "휴지통으로 이동  ⌘⌫".to_string(),
+    }
 }
 
 const SORTS: [(SortKey, &str); 4] = [(SortKey::Name, "이름"), (SortKey::Modified, "수정한 날짜"), (SortKey::Size, "크기"), (SortKey::Type, "형식")];
@@ -259,6 +279,9 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
         }
         if ui.add_enabled(m.selected.is_some(), egui::Button::new("전체 보기")).on_hover_text("선택한 사진 크게 보기 (Enter·더블클릭)").clicked() {
             out.actions.push(Action::EnterView);
+        }
+        if ui.add_enabled(m.selected.is_some(), egui::Button::new("휴지통")).on_hover_text("선택한 사진을 휴지통으로 (⌘⌫)").clicked() {
+            out.actions.push(Action::Trash);
         }
         ui.separator();
         ui.label("크기");
@@ -359,6 +382,7 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
         out.visible = (first.saturating_sub(2) * cols).min(n)..((last + 2) * cols).min(n);
         let origin = ui.max_rect().min;
         let painter = ui.painter().clone();
+        let mods = ui.input(|i| i.modifiers);
         for r in first..last {
             for c in 0..cols {
                 let i = r * cols + c;
@@ -366,20 +390,39 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
                 let min = origin + Vec2::new(left_pad + c as f32 * pitch_x, r as f32 * pitch_y);
                 let cell = Rect::from_min_size(min, Vec2::new(tile, tile + LABEL_H));
                 let resp = ui.interact(cell, ui.scope_id().with(("iv-thumb", e.id.0)), Sense::CLICK);
+                // 체크 상자는 칸보다 나중에 등록 → 위에 놓여 그 자리 클릭을 가져간다
+                let check = Rect::from_min_size(cell.min + Vec2::splat(6.0), Vec2::splat(CHECK));
+                let check_resp = ui.interact(check, ui.scope_id().with(("iv-check", e.id.0)), Sense::CLICK);
+                if check_resp.clicked() {
+                    out.actions.push(Action::ToggleSelect(i));
+                }
+                //#region 클릭 — ⌘ 토글 · ⇧ 범위 · 그냥 클릭은 한 장만 (이미 현재 항목이어도 여러 장 선택을 푼다)
                 if resp.double_clicked() {
                     out.actions.push(Action::Activate(i));
-                } else if resp.clicked() && m.selected != Some(i) {
-                    out.actions.push(Action::Select(i));
+                } else if resp.clicked() {
+                    if mods.command {
+                        out.actions.push(Action::ToggleSelect(i));
+                    } else if mods.shift {
+                        out.actions.push(Action::RangeSelect(i));
+                    } else if m.selected != Some(i) || m.marked.len() > 1 || !m.marked.contains(&e.id) {
+                        out.actions.push(Action::Select(i));
+                    }
                 }
-                let selected = m.selected == Some(i);
-                draw_tile(&painter, st, m, e, cell, tile, selected, resp.hovered());
+                //#endregion
+                let marked = m.marked.contains(&e.id);
+                let hovered = resp.contains_pointer() || check_resp.contains_pointer();
+                draw_tile(&painter, st, m, e, cell, tile, marked, m.selected == Some(i), hovered);
+                // 마우스를 올렸거나, 선택됐거나, 여러 장 고르는 중이면 체크 상자를 보인다
+                if hovered || marked || m.marked.len() > 1 {
+                    draw_check(&painter, check, marked, check_resp.hovered());
+                }
             }
         }
     });
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_tile(painter: &egui::Painter, st: &BrowserState, m: &BrowserModel<'_>, e: &Entry, cell: Rect, tile: f32, selected: bool, hovered: bool) {
+fn draw_tile(painter: &egui::Painter, st: &BrowserState, m: &BrowserModel<'_>, e: &Entry, cell: Rect, tile: f32, selected: bool, current: bool, hovered: bool) {
     let bg = if selected {
         Color32::from_rgb(38, 79, 120)
     } else if hovered {
@@ -408,8 +451,27 @@ fn draw_tile(painter: &egui::Painter, st: &BrowserState, m: &BrowserModel<'_>, e
     if let Some([w, h]) = st.textures.full_size(e.id.0) {
         painter.text(Pos2::new(cell.center().x, cell.min.y + tile + 17.0), Align2::CENTER_TOP, format!("{w}×{h}"), FontId::proportional(11.0), Color32::from_gray(150));
     }
-    if selected {
-        painter.rect_stroke(cell, CornerRadius::same(4), Stroke::new(1.5, Color32::from_rgb(90, 150, 220)), StrokeKind::Inside);
+    // 테두리 = 현재 항목 (여러 장 선택 중에도 키보드·미리보기 기준이 어디인지 보이게)
+    if current {
+        let color = if selected { Color32::from_rgb(90, 150, 220) } else { Color32::from_gray(140) };
+        painter.rect_stroke(cell, CornerRadius::same(4), Stroke::new(1.5, color), StrokeKind::Inside);
+    }
+}
+
+const CHECK: f32 = 20.0;
+
+/// 썸네일 왼쪽 위 체크 상자 (글꼴에 기대지 않고 선으로 그린다)
+fn draw_check(painter: &egui::Painter, r: Rect, checked: bool, hovered: bool) {
+    if checked {
+        painter.rect_filled(r, CornerRadius::same(4), Color32::from_rgb(52, 120, 220));
+        let p = |x: f32, y: f32| Pos2::new(r.min.x + r.width() * x, r.min.y + r.height() * y);
+        painter.line_segment([p(0.24, 0.52), p(0.43, 0.70)], Stroke::new(2.2, Color32::WHITE));
+        painter.line_segment([p(0.43, 0.70), p(0.77, 0.32)], Stroke::new(2.2, Color32::WHITE));
+    } else {
+        // 밝은 사진 위에서도 보이게: 어두운 바깥 테두리 + 흰 안쪽 테두리
+        painter.rect_filled(r, CornerRadius::same(4), Color32::from_black_alpha(if hovered { 190 } else { 150 }));
+        painter.rect_stroke(r.expand(1.0), CornerRadius::same(5), Stroke::new(1.0, Color32::from_black_alpha(160)), StrokeKind::Inside);
+        painter.rect_stroke(r, CornerRadius::same(4), Stroke::new(1.5, Color32::from_gray(if hovered { 255 } else { 235 })), StrokeKind::Inside);
     }
 }
 

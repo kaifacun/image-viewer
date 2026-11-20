@@ -1,4 +1,6 @@
-# iv — 빠른 이미지 뷰어
+# KaiIV — 빠른 이미지 뷰어
+
+실행 파일 `kaiiv` (`cargo run --release -p iv`). 내부 crate 이름은 `iv-*` 그대로.
 
 Rust + GPU(wgpu) 이미지 뷰어. 맥 우선, 이후 Windows. 설계는 [docs/architecture.md](docs/architecture.md).
 
@@ -18,6 +20,10 @@ cargo run --release -p iv -- <폴더> --renderer=cpu      # CPU 렌더러 강제
 | 입력 | 동작 |
 |---|---|
 | 클릭 / 더블클릭·Enter·Space | 선택 / 전체 보기 |
+| ⌘+클릭, 썸네일 왼쪽 위 체크 상자 | 한 장씩 선택에 넣기·빼기 |
+| ⇧+클릭, ⇧+화살표 | 범위 선택 |
+| ⌘A | 모두 선택 |
+| ⌘⌫ / Delete, 도구모음 "휴지통" | 선택한 사진을 휴지통으로 (되돌리기 가능 — Finder 휴지통) |
 | ← → ↑ ↓, PageUp/PageDown, Home/End | 격자 이동 |
 | Backspace / ⌘R | 상위 폴더 / 새로고침 |
 | 트리 클릭, ▶ | 폴더 열기, 펼치기 |
@@ -30,8 +36,9 @@ cargo run --release -p iv -- <폴더> --renderer=cpu      # CPU 렌더러 강제
 |---|---|
 | → ↓ Space PageDown / ← ↑ Backspace PageUp | 다음 / 이전 |
 | Home / End | 처음 / 끝 |
-| + / - , 마우스 휠, 트랙패드 핀치, ⌘+트랙패드 스크롤 | 확대·축소 (커서 기준) |
-| 드래그, 트랙패드 두 손가락 스크롤 | 이동 |
+| + / - , 마우스 휠·트랙패드 스크롤, 트랙패드 핀치 | 확대·축소 (커서 기준) |
+| 끌기 | 이동 (화면보다 클 때) |
+| ⌘⌫ / Delete | 보고 있는 사진을 휴지통으로 |
 | 0 / 9 / 1 | 화면 맞춤 / 작은 이미지도 맞춤 / 원본 크기 |
 | 더블클릭 | 맞춤 ↔ 1:1 |
 | Esc | 브라우저로 (전체 화면이면 먼저 해제) |
@@ -41,7 +48,7 @@ cargo run --release -p iv -- <폴더> --renderer=cpu      # CPU 렌더러 강제
 | ⌘Q / ⌘W | 종료 |
 
 ## 썸네일 캐시
-`~/Library/Caches/iv/thumbs-v1-320` (Windows `%LOCALAPPDATA%\iv\cache`). 1GB 를 넘으면 시작 때 오래된 것부터 정리. `IV_CACHE_DIR` 로 위치 변경.
+`~/Library/Caches/KaiIV/thumbs-v1-320` (Windows `%LOCALAPPDATA%\KaiIV\cache`). 1GB 를 넘으면 시작 때 오래된 것부터 정리. `IV_CACHE_DIR` 로 위치 변경.
 
 ## 지원 형식
 - macOS ImageIO: JPEG·PNG·GIF·TIFF·HEIC/HEIF·AVIF·WebP·JPEG 2000·PSD·EXR·HDR·카메라 RAW(DNG/CR2/CR3/NEF/ARW/RAF/ORF/RW2…)
@@ -58,9 +65,9 @@ python3 tools/make-fixtures.py scratch/fixtures         # 시험 이미지 생�
 cargo run --release -p iv -- scratch/fixtures/orient6.jpg --render-to=out.png --size=400x300 --renderer=cpu
 cargo run --release -p iv-viewer --example nav_bench -- scratch/fixtures 300     # 넘기기 체감 시간
 cargo run --release -p iv-decode-imageio --example decode_bench -- scratch/fixtures 2560
-IV_SELFTEST="wait:1000;cap:/abs/a.png;act:next;wait:100;cap:/abs/b.png;quit" ./target/release/iv scratch/fixtures
+IV_SELFTEST="wait:1000;cap:/abs/a.png;act:next;wait:100;cap:/abs/b.png;quit" ./target/release/kaiiv scratch/fixtures
 # 브라우저 자가 시험 (사용자 폴더·캐시를 건드리지 않게 scratch 로 고정)
 IV_CACHE_DIR=$PWD/scratch/cache IV_TREE_ROOTS=$PWD/scratch \
 IV_SELFTEST="wait-thumbs:8000;cap:/abs/b1.png;key:down;key:enter;wait:500;cap:/abs/b2.png;key:escape;dblclick:700,250;quit" \
-  ./target/release/iv scratch/many
+  ./target/release/kaiiv scratch/many
 ```
