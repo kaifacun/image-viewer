@@ -80,6 +80,8 @@ struct App {
     /// 잘라낸 파일들과 그때의 클립보드 변경 번호 — 붙여넣을 때 클립보드가 그대로면 옮기고, 아니면 복사
     cut_paths: HashSet<PathBuf>,
     cut_count: i64,
+    /// 형식 묶음 (확장자 필터 메뉴·스캔 비트)
+    groups: Vec<iv_core::formats::FormatGroup>,
     /// 스캔 판정이 바뀜 — 다음 기회(초당 한 번, 누르고 있지 않을 때)에 다시 만든다
     tree_scan_changed: bool,
     /// 전체 보기 중 열린 폴더가 밖에서 바뀜 — 브라우저로 돌아오면 확인 (전체 보기 확대 상태를 깨지 않게)
@@ -114,6 +116,8 @@ impl App {
     fn new(args: Args, registry: DecoderRegistry, proxy: EventLoopProxy<UserEvent>) -> Self {
         let registry = Arc::new(registry);
         let extensions = registry.known_extensions();
+        // 형식 묶음 (필터 단위 = 스캔 비트). 지금은 사진만 — 비디오·문서 모드는 묶음을 덧붙인다.
+        let groups = iv_core::formats::image_groups(&extensions);
         let loader_cfg = LoaderConfig::default();
         let gate = loader_cfg.gate.clone();
         let p1 = proxy.clone();
@@ -126,7 +130,7 @@ impl App {
         let cache_dir = iv_thumbs::default_cache_dir();
         let cache_file = cache_dir.as_ref().map(|d| d.join("scan-v1.tsv"));
         let ignore = cache_dir.into_iter().collect();
-        let scanner = Scanner::start(ScanConfig { roots: tree.root_paths(), extensions: extensions.clone(), gate: Some(gate.clone()), ignore, cache_file }, move || {
+        let scanner = Scanner::start(ScanConfig { roots: tree.root_paths(), groups: groups.iter().map(|g| g.exts.clone()).collect(), gate: Some(gate.clone()), ignore, cache_file }, move || {
             let _ = p2.send_event(UserEvent::ScanWake);
         });
         //#endregion
@@ -151,6 +155,7 @@ impl App {
             tree_dirty: true,
             keep_visible: HashSet::new(),
             cut_paths: HashSet::new(),
+            groups,
             cut_count: 0,
             tree_scan_changed: false,
             browser: BrowserState::default(),
@@ -469,6 +474,10 @@ impl App {
     }
 
     fn handle(&mut self, a: Action, el: &ActiveEventLoop) {
+        // 필터가 바뀌면 트리(숨김·숫자)도 그 필터로 다시 만든다 — 다시 훑지 않고 조회만
+        if matches!(a, Action::SetFilter(_)) {
+            self.tree_dirty = true;
+        }
         //#region 이름 입력 대화 상자 열기 — UI 상태라 앱이 연다 (브라우저에서만)
         match &a {
             Action::BeginRename if self.viewer.mode == Mode::Browse => {
@@ -633,9 +642,14 @@ impl App {
                 let scanner = &self.scanner;
                 let keep = &self.keep_visible;
                 let show_all = self.browser.show_empty_folders;
-                let hide = |p: &Path| !show_all && open_dir.is_none_or(|d| !d.starts_with(p)) && !keep.iter().any(|k| k.starts_with(p)) && scanner.verdict(p) == Verdict::Empty;
+                // 필터 = 고른 확장자가 든 묶음들, 필터 없음 = 사진 묶음 전부 (모드의 전체 — 나중 비디오 묶음은 빠진다)
+                let mask = match self.viewer.filter() {
+                    Some(f) => iv_core::formats::group_mask(&self.groups, |g| g.exts.iter().any(|e| f.contains(e))),
+                    None => iv_core::formats::group_mask(&self.groups, |g| g.kind == iv_core::formats::MediaKind::Image),
+                };
+                let hide = |p: &Path| !show_all && open_dir.is_none_or(|d| !d.starts_with(p)) && !keep.iter().any(|k| k.starts_with(p)) && scanner.verdict_for(p, mask) == Verdict::Empty;
                 self.tree_rows = self.tree.visible_rows_where(&hide);
-                self.tree_counts = self.tree_rows.iter().map(|r| scanner.info(&r.path).map(|i| (i.photos, i.folders))).collect();
+                self.tree_counts = self.tree_rows.iter().map(|r| scanner.counts_for(&r.path, mask)).collect();
                 self.tree_rows_at = Some(Instant::now());
                 self.tree_dirty = false;
             }
@@ -654,6 +668,8 @@ impl App {
                 failed: &self.thumb_failed,
                 scan_status: &scan_status,
                 cut: &self.cut_paths,
+                groups: &self.groups,
+                filter: self.viewer.filter(),
                 preview_has_frame: self.viewer.shown.as_ref().is_some_and(|s| Some(s.key) == cur),
             };
             let browser = &mut self.browser;

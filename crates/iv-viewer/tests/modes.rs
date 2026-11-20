@@ -335,3 +335,30 @@ fn batch_rotate_and_paste_results() {
     assert_eq!(v.library.len(), 4);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// 확장자 필터: 목록·선택·휴지통 대상이 필터 안의 것만 — 휴지통·옮기기·잘라내기 안전 조건
+#[test]
+fn extension_filter_limits_everything() {
+    let (d, l, mut v) = setup("filt", 3);
+    std::fs::copy(d.join("img00.png"), d.join("photo.jpg")).unwrap();
+    std::fs::copy(d.join("img00.png"), d.join("other.JPG")).unwrap();
+    let _ = v.open(&d, &l);
+    assert_eq!(v.library.len(), 5);
+    let _ = v.handle(Action::Select(1), &l);
+    let cur = v.current().unwrap().name.clone();
+    let fx = v.handle(Action::SetFilter(Some(vec!["png"])), &l);
+    assert!(fx.library_changed);
+    assert_eq!(v.library.len(), 3);
+    assert!(v.library.entries().iter().all(|e| e.name.ends_with(".png")));
+    assert_eq!(v.current().unwrap().name, cur, "남아 있는 현재 장은 지킨다");
+    let _ = v.handle(Action::SelectAll, &l);
+    assert!(v.trash_targets().iter().all(|p| p.extension().unwrap() == "png"));
+    // jpg 만 (대소문자 무시)
+    let _ = v.handle(Action::SetFilter(Some(vec!["jpg"])), &l);
+    assert_eq!(v.library.len(), 2);
+    // 빈 목록 = 필터 없음
+    let _ = v.handle(Action::SetFilter(Some(vec![])), &l);
+    assert!(v.filter().is_none());
+    assert_eq!(v.library.len(), 5);
+    let _ = std::fs::remove_dir_all(&d);
+}

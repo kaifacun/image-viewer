@@ -181,6 +181,10 @@ pub struct BrowserModel<'a> {
     pub scan_status: &'a str,
     /// 잘라낸(붙여넣으면 옮겨질) 파일 — 흐리게 그린다
     pub cut: &'a HashSet<PathBuf>,
+    /// 확장자 필터 메뉴의 형식 묶음
+    pub groups: &'a [iv_core::formats::FormatGroup],
+    /// 지금 걸린 확장자 필터 (None = 전부)
+    pub filter: Option<&'a HashSet<&'static str>>,
     /// 미리보기 칸에 렌더러가 실제 프레임을 그리는가 (아니면 썸네일로 대신 채움)
     pub preview_has_frame: bool,
 }
@@ -427,6 +431,7 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
         let (cur, asc) = m.sort;
         let name = SORTS.iter().find(|(k, _)| *k == cur).map(|(_, n)| *n).unwrap_or("");
         egui::ComboBox::from_id_salt("iv-sort").selected_text(format!("정렬: {name} {}", if asc { "↑" } else { "↓" })).show_ui(ui, |ui| sort_items(ui, m, out));
+        filter_menu(ui, m, out);
         ui.separator();
         // 경로 줄 — 고쳐 쓰고 Enter 로 이동
         let dir_s = m.dir.map(|d| d.display().to_string()).unwrap_or_default();
@@ -456,6 +461,43 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
         }
     });
 }
+
+//#region 확장자 필터 — 형식 묶음별 체크, 고른 것의 사진·폴더만 보인다
+fn filter_menu(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+    use egui::containers::menu::{MenuButton, MenuConfig};
+    let on = |g: &iv_core::formats::FormatGroup| m.filter.is_some_and(|f| g.exts.iter().any(|e| f.contains(e)));
+    let chosen: Vec<&str> = m.groups.iter().filter(|g| on(g)).map(|g| g.name).collect();
+    // 필터가 걸려 있으면 눈에 띄게 (폴더·사진이 사라진 것처럼 보이지 않게)
+    let label = if chosen.is_empty() {
+        RichText::new("필터: 전체")
+    } else {
+        RichText::new(format!("필터: {}", chosen.join("·"))).color(Color32::from_rgb(255, 200, 90)).strong()
+    };
+    let button = egui::Button::new(label).selected(!chosen.is_empty());
+    let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    MenuButton::from_button(button).config(config).ui(ui, |ui| {
+        ui.label(RichText::new("고른 형식의 사진과 그 사진이 든 폴더만 보입니다").size(11.0).color(Color32::from_gray(150)));
+        ui.separator();
+        let mut changed = None;
+        for (i, g) in m.groups.iter().enumerate() {
+            let mut checked = on(g);
+            let tip = g.exts.join(", ");
+            if ui.checkbox(&mut checked, g.name).on_hover_text(tip).changed() {
+                changed = Some(i);
+            }
+        }
+        if let Some(i) = changed {
+            let exts: Vec<&'static str> = m.groups.iter().enumerate().filter(|(k, g)| if *k == i { !on(g) } else { on(g) }).flat_map(|(_, g)| g.exts.iter().copied()).collect();
+            out.actions.push(Action::SetFilter(Some(exts)));
+        }
+        ui.separator();
+        if ui.add_enabled(!chosen.is_empty(), egui::Button::new("필터 해제 — 모두 보기")).clicked() {
+            out.actions.push(Action::SetFilter(None));
+            ui.close();
+        }
+    });
+}
+//#endregion
 
 fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
@@ -536,7 +578,12 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
     let n = m.entries.len();
     if n == 0 {
         let r = ui.centered_and_justified(|ui| {
-            ui.label(RichText::new(if m.dir.is_some() { "이 폴더에는 사진이 없습니다" } else { "왼쪽에서 폴더를 고르세요" }).color(Color32::from_gray(150)));
+            let text = match (m.dir.is_some(), m.filter.is_some()) {
+                (true, true) => "필터에 맞는 사진이 없습니다 — 위 '필터' 에서 해제할 수 있습니다",
+                (true, false) => "이 폴더에는 사진이 없습니다",
+                _ => "왼쪽에서 폴더를 고르세요",
+            };
+            ui.label(RichText::new(text).color(Color32::from_gray(150)));
         });
         if m.dir.is_some() {
             ui.interact(r.response.rect, ui.scope_id().with("iv-empty-bg"), Sense::click()).context_menu(|ui| background_menu(ui, st, m, out));

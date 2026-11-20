@@ -97,6 +97,8 @@ pub enum Action {
     Paste(Option<PathBuf>),
     /// ⌥⌘C — 선택한 사진의 절대 경로(없으면 열린 폴더 경로)를 글로 복사
     CopyPath,
+    /// 확장자 필터 — 이 확장자의 사진만 보인다 (None·빈 목록 = 필터 없음)
+    SetFilter(Option<Vec<&'static str>>),
 }
 
 /// 앱이 실행할 파일 작업
@@ -225,6 +227,8 @@ pub struct ViewerState {
     pub config: ViewerConfig,
     generation: u64,
     extensions: HashSet<&'static str>,
+    /// 확장자 필터 (None = 전부). 목록을 여는 모든 곳은 [`Self::exts`] 를 쓴다.
+    filter: Option<HashSet<&'static str>>,
     /// 브라우저에서 선택된 항목들 (정렬해도 유지되게 id 로). 평범한 이동은 현재 항목 하나로 되돌린다.
     marked: HashSet<EntryId>,
     /// ⇧ 범위 선택의 기준 항목
@@ -259,6 +263,7 @@ impl ViewerState {
             config,
             generation: 0,
             extensions,
+            filter: None,
             marked: HashSet::new(),
             anchor: None,
             file_op: None,
@@ -266,6 +271,19 @@ impl ViewerState {
             turns: 0,
             shown_base: Orientation::Normal,
         }
+    }
+
+    /// 목록에 넣을 확장자 (필터가 있으면 필터 ∩ 아는 확장자)
+    fn exts(&self) -> HashSet<&'static str> {
+        match &self.filter {
+            Some(f) => self.extensions.intersection(f).copied().collect(),
+            None => self.extensions.clone(),
+        }
+    }
+
+    /// 지금 걸린 확장자 필터
+    pub fn filter(&self) -> Option<&HashSet<&'static str>> {
+        self.filter.as_ref()
     }
 
     pub fn current(&self) -> Option<&Entry> {
@@ -334,7 +352,7 @@ impl ViewerState {
     pub fn open(&mut self, path: &Path, loader: &Loader) -> Effects {
         let is_dir = path.is_dir();
         let mode = if is_dir && self.browse_available { Mode::Browse } else { Mode::View };
-        match Library::open(path, &self.extensions) {
+        match Library::open(path, &self.exts()) {
             Ok(lib) => {
                 self.library = lib;
                 self.mode = mode;
@@ -366,7 +384,7 @@ impl ViewerState {
         let Some(dir) = self.library.dir().map(Path::to_path_buf) else { return Effects::default() };
         let cur = self.library.current().and_then(|e| e.path().map(Path::to_path_buf));
         let (key, asc) = self.library.sort_order();
-        let Ok(mut lib) = Library::open(&dir, &self.extensions) else { return self.open(&dir, loader) };
+        let Ok(mut lib) = Library::open(&dir, &self.exts()) else { return self.open(&dir, loader) };
         lib.sort(key, asc);
         if let Some(i) = cur.and_then(|c| lib.entries().iter().position(|e| e.path() == Some(c.as_path()))) {
             lib.go_to(i);
@@ -387,7 +405,7 @@ impl ViewerState {
     /// 폴더 내용이 밖에서 바뀌었을 때(감시): 목록이 실제로 달라졌을 때만 새로고침 (자기 휴지통 이동 등은 그대로)
     pub fn refresh_if_changed(&mut self, loader: &Loader) -> Effects {
         let Some(dir) = self.library.dir().map(Path::to_path_buf) else { return Effects::default() };
-        let Ok(lib) = Library::open(&dir, &self.extensions) else { return self.refresh(loader) };
+        let Ok(lib) = Library::open(&dir, &self.exts()) else { return self.refresh(loader) };
         let now: HashSet<EntryId> = self.library.entries().iter().map(|e| e.id).collect();
         if lib.len() == now.len() && lib.entries().iter().all(|e| now.contains(&e.id)) {
             return Effects::default();
@@ -600,6 +618,22 @@ impl ViewerState {
                     return Effects::default();
                 }
                 self.request(FileOp::MoveTo { dest })
+            }
+            Action::SetFilter(f) => {
+                let f: Option<HashSet<&'static str>> = f.filter(|v| !v.is_empty()).map(|v| v.into_iter().collect());
+                if f == self.filter {
+                    return Effects::default();
+                }
+                self.filter = f;
+                if self.library.dir().is_none() {
+                    return Effects::redraw();
+                }
+                // 다시 나열: 남아 있는 현재 장·선택은 지키고, 사라진 것은 뺀다
+                let fx = self.refresh(loader);
+                if self.library.is_empty() && self.mode == Mode::View && self.browse_available {
+                    self.mode = Mode::Browse;
+                }
+                fx
             }
             Action::RotateMarked(q) => {
                 if self.mode != Mode::Browse || q % 4 == 0 || self.trash_targets().is_empty() {

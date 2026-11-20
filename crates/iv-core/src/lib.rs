@@ -6,6 +6,7 @@
 mod cancel;
 mod decoder;
 mod error;
+pub mod formats;
 mod frame;
 mod gate;
 mod registry;

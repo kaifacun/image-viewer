@@ -149,6 +149,10 @@ fn parse(t: &str) -> Option<Step> {
                 } else if let Some(n) = other.strip_prefix("renamefolder=") {
                     let (p, n) = n.split_once('|')?;
                     Action::RenameFolder { path: PathBuf::from(p), name: n.to_string() }
+                } else if let Some(f) = other.strip_prefix("filter=") {
+                    // filter=jpg,jpeg,png · filter= (해제). 시험 한 번에 몇 개뿐이라 leak 해도 된다
+                    let v: Vec<&'static str> = f.split(',').filter(|x| !x.is_empty()).map(|x| &*Box::leak(x.to_ascii_lowercase().into_boxed_str())).collect();
+                    Action::SetFilter((!v.is_empty()).then_some(v))
                 } else if let Some(p) = other.strip_prefix("paste=") {
                     Action::Paste(Some(PathBuf::from(p)))
                 } else if let Some(q) = other.strip_prefix("rotatemarked=") {
