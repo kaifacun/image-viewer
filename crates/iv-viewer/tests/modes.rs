@@ -362,3 +362,28 @@ fn extension_filter_limits_everything() {
     assert_eq!(v.library.len(), 5);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// 종류 전환: 사진 모드엔 비디오가, 비디오 모드엔 사진이 안 보이고, 비디오 파일을 열면 비디오 모드
+#[test]
+fn media_kind_switch() {
+    use iv_core::formats::MediaKind;
+    let (d, l, mut v) = setup("kind", 2);
+    std::fs::write(d.join("clip.mp4"), b"x").unwrap();
+    let img: std::collections::HashSet<&'static str> = ["png"].into_iter().collect();
+    let vid: std::collections::HashSet<&'static str> = ["mp4"].into_iter().collect();
+    v.set_kinds(vec![(MediaKind::Image, img), (MediaKind::Video, vid)]);
+    let _ = v.open(&d, &l);
+    assert_eq!(v.library.len(), 2);
+    let _ = v.handle(Action::SetFilter(Some(vec!["png"])), &l);
+    let fx = v.handle(Action::SetKind(MediaKind::Video), &l);
+    assert!(fx.library_changed);
+    assert_eq!(v.kind(), MediaKind::Video);
+    assert!(v.filter().is_none(), "종류를 바꾸면 필터는 풀린다");
+    assert_eq!(v.library.entries().iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["clip.mp4"]);
+    let _ = v.handle(Action::SetKind(MediaKind::Image), &l);
+    assert_eq!(v.library.len(), 2);
+    // 비디오 파일을 직접 열면 비디오 모드
+    let _ = v.open(&d.join("clip.mp4"), &l);
+    assert_eq!(v.kind(), MediaKind::Video);
+    let _ = std::fs::remove_dir_all(&d);
+}

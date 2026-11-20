@@ -8,6 +8,27 @@ use std::collections::HashSet;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MediaKind {
     Image,
+    Video,
+}
+
+impl MediaKind {
+    /// 화면 모드 순서 (모드 전환 버튼) — 문서 모드는 여기 덧붙인다
+    pub const ALL: [Self; 2] = [Self::Image, Self::Video];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Image => "사진",
+            Self::Video => "비디오",
+        }
+    }
+
+    /// 세는 단위 ("사진 3장", "비디오 3개")
+    pub fn unit(self) -> &'static str {
+        match self {
+            Self::Image => "장",
+            Self::Video => "개",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +58,40 @@ const IMAGE_TABLE: &[(&str, &[&str])] = &[
         ],
     ),
 ];
+
+/// 비디오 묶음 (AVFoundation 이 재생하는 것)
+const VIDEO_TABLE: &[(&str, &[&str])] = &[("MP4", &["mp4", "m4v"]), ("MOV", &["mov", "qt"]), ("3GP", &["3gp", "3g2"])];
+
+/// 비디오 확장자 전부 (디코더가 알든 모르든 — 사진 쪽 "기타" 로 새지 않게 먼저 뺀다)
+pub fn video_extensions() -> impl Iterator<Item = &'static str> {
+    VIDEO_TABLE.iter().flat_map(|(_, e)| e.iter().copied())
+}
+
+/// 모든 종류의 묶음: 사진 묶음 다음 비디오 묶음. 비디오 확장자는 사진 "기타" 에 들어가지 않는다.
+pub fn media_groups(known: &HashSet<&'static str>) -> Vec<FormatGroup> {
+    let video: HashSet<&'static str> = video_extensions().collect();
+    let images: HashSet<&'static str> = known.iter().copied().filter(|e| !video.contains(e)).collect();
+    let mut out = image_groups(&images);
+    for (name, exts) in VIDEO_TABLE {
+        let mut exts: Vec<&'static str> = exts.iter().copied().filter(|e| known.contains(e)).collect();
+        exts.sort_unstable();
+        if !exts.is_empty() {
+            out.push(FormatGroup { name, kind: MediaKind::Video, exts });
+        }
+    }
+    out
+}
+
+/// 한 종류의 확장자 전부
+pub fn kind_extensions(groups: &[FormatGroup], kind: MediaKind) -> HashSet<&'static str> {
+    groups.iter().filter(|g| g.kind == kind).flat_map(|g| g.exts.iter().copied()).collect()
+}
+
+/// 확장자의 종류 (모르는 확장자면 None)
+pub fn kind_of(groups: &[FormatGroup], ext: &str) -> Option<MediaKind> {
+    let ext = ext.to_ascii_lowercase();
+    groups.iter().find(|g| g.exts.iter().any(|e| *e == ext)).map(|g| g.kind)
+}
 
 /// 디코더가 아는 확장자(`known`)로 사진 묶음을 만든다. 표에 없는 확장자는 마지막 "기타" 묶음.
 pub fn image_groups(known: &HashSet<&'static str>) -> Vec<FormatGroup> {
@@ -79,5 +134,16 @@ mod tests {
         let total: usize = g.iter().map(|g| g.exts.len()).sum();
         assert_eq!(total, known.len());
         assert_eq!(group_mask(&g, |g| g.name == "PNG" || g.name == "기타"), 0b1010);
+    }
+
+    #[test]
+    fn video_extensions_never_leak_into_images() {
+        let known: HashSet<&'static str> = ["jpg", "mp4", "mov", "exr"].into_iter().collect();
+        let g = media_groups(&known);
+        let names: Vec<(&str, MediaKind)> = g.iter().map(|g| (g.name, g.kind)).collect();
+        assert_eq!(names, [("JPEG", MediaKind::Image), ("기타", MediaKind::Image), ("MP4", MediaKind::Video), ("MOV", MediaKind::Video)]);
+        assert_eq!(kind_extensions(&g, MediaKind::Image), ["jpg", "exr"].into_iter().collect());
+        assert_eq!(kind_of(&g, "MOV"), Some(MediaKind::Video));
+        assert_eq!(kind_of(&g, "txt"), None);
     }
 }

@@ -127,6 +127,8 @@ fn parse(t: &str) -> Option<Step> {
             "cut" => Action::Cut,
             "paste" => Action::Paste(None),
             "copypath" => Action::CopyPath,
+            "kind=image" => Action::SetKind(iv_core::formats::MediaKind::Image),
+            "kind=video" => Action::SetKind(iv_core::formats::MediaKind::Video),
             other => {
                 if let Some(p) = other.strip_prefix("pan=") {
                     let (x, y) = p.split_once(',')?;

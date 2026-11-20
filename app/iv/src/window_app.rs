@@ -12,6 +12,7 @@ use iv_fstree::FolderTree;
 use iv_library::EntryId;
 use iv_pipeline::{Loader, LoaderConfig};
 use iv_render::{EguiPaint, RenderOutcome, Renderer, Scene, UiCapability};
+use iv_core::formats::MediaKind;
 use iv_scan::{ScanConfig, Scanner, Verdict};
 use iv_thumbs::{ThumbConfig, ThumbEvent, ThumbRequest, ThumbService};
 use iv_ui::browser::{BrowserModel, BrowserState};
@@ -117,7 +118,7 @@ impl App {
         let registry = Arc::new(registry);
         let extensions = registry.known_extensions();
         // 형식 묶음 (필터 단위 = 스캔 비트). 지금은 사진만 — 비디오·문서 모드는 묶음을 덧붙인다.
-        let groups = iv_core::formats::image_groups(&extensions);
+        let groups = iv_core::formats::media_groups(&extensions);
         let loader_cfg = LoaderConfig::default();
         let gate = loader_cfg.gate.clone();
         let p1 = proxy.clone();
@@ -137,7 +138,8 @@ impl App {
         let thumbs = ThumbService::new(registry, ThumbConfig { gate: Some(gate), ..Default::default() }, move || {
             let _ = proxy.send_event(UserEvent::ThumbWake);
         });
-        let viewer = ViewerState::new([1280.0, 800.0], extensions, ViewerConfig::default());
+        let mut viewer = ViewerState::new([1280.0, 800.0], extensions, ViewerConfig::default());
+        viewer.set_kinds(MediaKind::ALL.iter().map(|&k| (k, iv_core::formats::kind_extensions(&groups, k))).collect());
         // 인자 없으면 시작 폴더(IV_START_DIR → 홈)를 브라우저로
         let pending_open = args.path.clone().or_else(|| std::env::var_os("IV_START_DIR").or_else(|| std::env::var_os("HOME")).map(PathBuf::from));
         Self {
@@ -475,7 +477,7 @@ impl App {
 
     fn handle(&mut self, a: Action, el: &ActiveEventLoop) {
         // 필터가 바뀌면 트리(숨김·숫자)도 그 필터로 다시 만든다 — 다시 훑지 않고 조회만
-        if matches!(a, Action::SetFilter(_)) {
+        if matches!(a, Action::SetFilter(_) | Action::SetKind(_)) {
             self.tree_dirty = true;
         }
         //#region 이름 입력 대화 상자 열기 — UI 상태라 앱이 연다 (브라우저에서만)
@@ -583,7 +585,7 @@ impl App {
             match g.renderer.capture(scene) {
                 Some((w, h, px)) => {
                     let ok = image::save_buffer(&path, &px, w, h, image::ExtendedColorType::Rgba8).is_ok();
-                    log::info!("자가 시험 캡처 {} {w}x{h} {} | {status} | {}", path.display(), if ok { "저장" } else { "실패" }, self.scanner.status().text());
+                    log::info!("자가 시험 캡처 {} {w}x{h} {} | {status} | {}", path.display(), if ok { "저장" } else { "실패" }, { let k = self.viewer.kind(); self.scanner.status().text_for(kind_mask(&self.groups, &self.viewer), k.label(), k.unit()) });
                 }
                 None => log::warn!("자가 시험 캡처 실패"),
             }
@@ -643,17 +645,16 @@ impl App {
                 let keep = &self.keep_visible;
                 let show_all = self.browser.show_empty_folders;
                 // 필터 = 고른 확장자가 든 묶음들, 필터 없음 = 사진 묶음 전부 (모드의 전체 — 나중 비디오 묶음은 빠진다)
-                let mask = match self.viewer.filter() {
-                    Some(f) => iv_core::formats::group_mask(&self.groups, |g| g.exts.iter().any(|e| f.contains(e))),
-                    None => iv_core::formats::group_mask(&self.groups, |g| g.kind == iv_core::formats::MediaKind::Image),
-                };
+                let mask = tree_mask(&self.groups, &self.viewer);
                 let hide = |p: &Path| !show_all && open_dir.is_none_or(|d| !d.starts_with(p)) && !keep.iter().any(|k| k.starts_with(p)) && scanner.verdict_for(p, mask) == Verdict::Empty;
                 self.tree_rows = self.tree.visible_rows_where(&hide);
                 self.tree_counts = self.tree_rows.iter().map(|r| scanner.counts_for(&r.path, mask)).collect();
                 self.tree_rows_at = Some(Instant::now());
                 self.tree_dirty = false;
             }
-            let scan_status = self.scanner.status().text();
+            let kind = self.viewer.kind();
+            let scan_status = self.scanner.status().text_for(kind_mask(&self.groups, &self.viewer), kind.label(), kind.unit());
+            let kind_groups: Vec<iv_core::formats::FormatGroup> = self.groups.iter().filter(|g| g.kind == kind).cloned().collect();
             //#endregion
             let cur = lib.current().map(|e| e.id.0);
             let model = BrowserModel {
@@ -668,7 +669,8 @@ impl App {
                 failed: &self.thumb_failed,
                 scan_status: &scan_status,
                 cut: &self.cut_paths,
-                groups: &self.groups,
+                groups: &kind_groups,
+                kind,
                 filter: self.viewer.filter(),
                 preview_has_frame: self.viewer.shown.as_ref().is_some_and(|s| Some(s.key) == cur),
             };
@@ -682,6 +684,7 @@ impl App {
                 has_image: self.viewer.current().is_some(),
                 can_browse: self.viewer.browse_available,
                 rotated: self.viewer.turns() != 0,
+                can_rotate: self.viewer.kind() == MediaKind::Image,
             };
             ctx.run_pass(raw, |ctx| ui_actions = iv_ui::draw(ctx, &model))
         };
@@ -1211,3 +1214,20 @@ fn clip_ok(selftest: bool) -> Result<(), String> {
     }
     Ok(())
 }
+
+//#region 종류·필터 → 스캔 묶음 비트
+/// 지금 종류의 묶음 전부
+fn kind_mask(groups: &[iv_core::formats::FormatGroup], v: &ViewerState) -> u64 {
+    let k = v.kind();
+    iv_core::formats::group_mask(groups, |g| g.kind == k)
+}
+
+/// 트리 숨김·숫자에 쓰는 비트: 지금 종류 ∩ 필터 (필터 없으면 종류 전부 — 다른 종류는 빠진다)
+fn tree_mask(groups: &[iv_core::formats::FormatGroup], v: &ViewerState) -> u64 {
+    let k = v.kind();
+    match v.filter() {
+        Some(f) => iv_core::formats::group_mask(groups, |g| g.kind == k && g.exts.iter().any(|e| f.contains(e))),
+        None => kind_mask(groups, v),
+    }
+}
+//#endregion

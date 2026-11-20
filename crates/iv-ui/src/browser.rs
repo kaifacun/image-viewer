@@ -183,6 +183,8 @@ pub struct BrowserModel<'a> {
     pub cut: &'a HashSet<PathBuf>,
     /// 확장자 필터 메뉴의 형식 묶음
     pub groups: &'a [iv_core::formats::FormatGroup],
+    /// 지금 보는 종류 (사진·비디오)
+    pub kind: iv_core::formats::MediaKind,
     /// 지금 걸린 확장자 필터 (None = 전부)
     pub filter: Option<&'a HashSet<&'static str>>,
     /// 미리보기 칸에 렌더러가 실제 프레임을 그리는가 (아니면 썸네일로 대신 채움)
@@ -322,8 +324,10 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
             let some = !m.marked.is_empty();
             clip_items(ui, some, m.dir.is_some(), None, out);
             ui.separator();
-            rotate_items(ui, some, out);
-            ui.separator();
+            if m.kind == iv_core::formats::MediaKind::Image {
+                rotate_items(ui, some, out);
+                ui.separator();
+            }
             if ui.add_enabled(!m.entries.is_empty(), egui::Button::new("모두 선택  ⌘A")).clicked() {
                 out.actions.push(Action::SelectAll);
             }
@@ -405,6 +409,16 @@ fn sort_items(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
 
 fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
     ui.horizontal(|ui| {
+        //#region 종류 전환 — 사진 · 비디오 (각자 따로 동작)
+        for (i, k) in iv_core::formats::MediaKind::ALL.into_iter().enumerate() {
+            let on = m.kind == k;
+            let text = RichText::new(k.label()).strong();
+            if ui.add(egui::Button::new(if on { text.color(Color32::WHITE) } else { text }).selected(on)).on_hover_text(format!("{} 보기 (⌘{})", k.label(), i + 1)).clicked() && !on {
+                out.actions.push(Action::SetKind(k));
+            }
+        }
+        ui.separator();
+        //#endregion
         if ui.button("⬆ 상위").on_hover_text("상위 폴더 (⌫)").clicked() {
             out.actions.push(Action::ParentFolder);
         }
@@ -417,12 +431,15 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
         if ui.add_enabled(!m.marked.is_empty(), egui::Button::new("휴지통")).on_hover_text("선택한 사진을 휴지통으로 (⌘⌫)").clicked() {
             out.actions.push(Action::Trash);
         }
-        let some = !m.marked.is_empty();
-        if icon_button(ui, Icon::RotateLeft, "선택한 사진 왼쪽으로 90° 돌려 저장", some, true).clicked() {
-            out.actions.push(Action::RotateMarked(3));
-        }
-        if icon_button(ui, Icon::RotateRight, "선택한 사진 오른쪽으로 90° 돌려 저장", some, true).clicked() {
-            out.actions.push(Action::RotateMarked(1));
+        // 회전은 사진만 (방향 태그 저장)
+        let some = !m.marked.is_empty() && m.kind == iv_core::formats::MediaKind::Image;
+        if m.kind == iv_core::formats::MediaKind::Image {
+            if icon_button(ui, Icon::RotateLeft, "선택한 사진 왼쪽으로 90° 돌려 저장", some, true).clicked() {
+                out.actions.push(Action::RotateMarked(3));
+            }
+            if icon_button(ui, Icon::RotateRight, "선택한 사진 오른쪽으로 90° 돌려 저장", some, true).clicked() {
+                out.actions.push(Action::RotateMarked(1));
+            }
         }
         ui.separator();
         ui.label("크기");
@@ -476,7 +493,7 @@ fn filter_menu(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
     let button = egui::Button::new(label).selected(!chosen.is_empty());
     let config = MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
     MenuButton::from_button(button).config(config).ui(ui, |ui| {
-        ui.label(RichText::new("고른 형식의 사진과 그 사진이 든 폴더만 보입니다").size(11.0).color(Color32::from_gray(150)));
+        ui.label(RichText::new(format!("고른 형식의 {0}과(와) 그 {0}이(가) 든 폴더만 보입니다", m.kind.label())).size(11.0).color(Color32::from_gray(150)));
         ui.separator();
         let mut changed = None;
         for (i, g) in m.groups.iter().enumerate() {
@@ -559,7 +576,7 @@ fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, o
                 if let Some(Some((photos, folders))) = m.tree_counts.get(k) {
                     let mut t = Vec::new();
                     if *photos > 0 {
-                        t.push(format!("{photos}장"));
+                        t.push(format!("{photos}{}", m.kind.unit()));
                     }
                     if *folders > 0 {
                         t.push(format!("폴더 {folders}"));
@@ -579,9 +596,9 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
     if n == 0 {
         let r = ui.centered_and_justified(|ui| {
             let text = match (m.dir.is_some(), m.filter.is_some()) {
-                (true, true) => "필터에 맞는 사진이 없습니다 — 위 '필터' 에서 해제할 수 있습니다",
-                (true, false) => "이 폴더에는 사진이 없습니다",
-                _ => "왼쪽에서 폴더를 고르세요",
+                (true, true) => format!("필터에 맞는 {}이(가) 없습니다 — 위 '필터' 에서 해제할 수 있습니다", m.kind.label()),
+                (true, false) => format!("이 폴더에는 {}이(가) 없습니다", m.kind.label()),
+                _ => "왼쪽에서 폴더를 고르세요".to_string(),
             };
             ui.label(RichText::new(text).color(Color32::from_gray(150)));
         });
@@ -697,8 +714,10 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
                     // 아래 동작은 선택 기준 — 선택에 없는 사진이면 먼저 그 사진만 고른다
                     let before = out.actions.len();
                     clip_items(ui, true, m.dir.is_some(), None, out);
-                    ui.separator();
-                    rotate_items(ui, true, out);
+                    if m.kind == iv_core::formats::MediaKind::Image {
+                        ui.separator();
+                        rotate_items(ui, true, out);
+                    }
                     if out.actions.len() > before && !marked {
                         out.actions.insert(before, Action::Select(i));
                     }

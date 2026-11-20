@@ -98,6 +98,10 @@ pub struct ScanStatus {
     pub photos: u64,
     /// 사진이 직접 들어 있는 폴더 수
     pub photo_dirs: u64,
+    /// 묶음별 수 (`groups` 순서) — 종류별(사진·비디오) 합계는 [`Self::count`]
+    pub totals: Vec<u64>,
+    /// 직접 든 묶음 표식 → 그런 폴더 수 — 종류별 폴더 수는 [`Self::dirs_with`]
+    pub dir_masks: HashMap<u64, u64>,
     /// 변경 감시 중 (FSEvents)
     pub watching: bool,
     /// 바뀐 폴더를 다시 훑는 중
@@ -109,7 +113,35 @@ pub struct ScanStatus {
 }
 
 impl ScanStatus {
-    /// 상태줄 오른쪽 글
+    /// `mask` 묶음의 파일 수
+    pub fn count(&self, mask: u64) -> u64 {
+        self.totals.iter().enumerate().filter(|(g, _)| mask & (1u64 << g) != 0).map(|(_, n)| *n).sum()
+    }
+
+    /// `mask` 묶음 파일이 직접 든 폴더 수
+    pub fn dirs_with(&self, mask: u64) -> u64 {
+        self.dir_masks.iter().filter(|(m, _)| **m & mask != 0).map(|(_, n)| *n).sum()
+    }
+
+    /// 상태줄 오른쪽 글 — `mask` 묶음만 센다 ("사진", "장" / "비디오", "개")
+    pub fn text_for(&self, mask: u64, noun: &str, unit: &str) -> String {
+        if self.done {
+            let tail = if self.updating {
+                "변경 반영 중…"
+            } else if self.watching {
+                "스캔 완료 · 변경 감시 중"
+            } else {
+                "스캔 완료"
+            };
+            format!("{noun} {}{unit} · 폴더 {}곳  ·  {tail}", group(self.count(mask)), group(self.dirs_with(mask)))
+        } else if self.from_cache {
+            format!("저장된 결과 확인 중…  폴더 {}개", group(self.dirs))
+        } else {
+            format!("{noun} 찾는 중…  폴더 {}개 · {noun} {}{unit}", group(self.dirs), group(self.count(mask)))
+        }
+    }
+
+    /// 상태줄 오른쪽 글 (모든 묶음)
     pub fn text(&self) -> String {
         if self.done {
             let tail = if self.updating {
@@ -127,6 +159,44 @@ impl ScanStatus {
         }
     }
 }
+
+//#region 상태 합계 — 폴더 하나의 묶음별 수를 더하고 뺀다
+fn mask_of(counts: &[u32]) -> u64 {
+    counts.iter().enumerate().filter(|(_, n)| **n > 0).fold(0, |m, (g, _)| m | (1u64 << g))
+}
+
+fn add_counts(st: &mut ScanStatus, counts: &[u32]) {
+    if st.totals.len() < counts.len() {
+        st.totals.resize(counts.len(), 0);
+    }
+    let n: u64 = counts.iter().map(|&c| u64::from(c)).sum();
+    for (t, &c) in st.totals.iter_mut().zip(counts) {
+        *t += u64::from(c);
+    }
+    st.photos += n;
+    st.photo_dirs += u64::from(n > 0);
+    let m = mask_of(counts);
+    if m != 0 {
+        *st.dir_masks.entry(m).or_default() += 1;
+    }
+}
+
+fn sub_counts(st: &mut ScanStatus, counts: &[u32]) {
+    let n: u64 = counts.iter().map(|&c| u64::from(c)).sum();
+    for (t, &c) in st.totals.iter_mut().zip(counts) {
+        *t = t.saturating_sub(u64::from(c));
+    }
+    st.photos = st.photos.saturating_sub(n);
+    st.photo_dirs = st.photo_dirs.saturating_sub(u64::from(n > 0));
+    let m = mask_of(counts);
+    if let Some(d) = st.dir_masks.get_mut(&m) {
+        *d = d.saturating_sub(1);
+        if *d == 0 {
+            st.dir_masks.remove(&m);
+        }
+    }
+}
+//#endregion
 
 /// 1234567 → "1,234,567"
 fn group(n: u64) -> String {
@@ -322,7 +392,7 @@ struct Walker {
     last_wake: Instant,
     count: u64,
     /// 폴더 → 직접 든 사진 수 (상태줄 합계를 변경 때 바로잡기 위해)
-    counts: HashMap<PathBuf, u64>,
+    counts: HashMap<PathBuf, Vec<u32>>,
     /// 감시하지 않는 루트 (/ · 원격 볼륨 · 감시 실패 시 전부) — 여기선 "없음"을 공개하지 않는다
     unwatched: Vec<PathBuf>,
     /// 지난 실행의 저장 결과 (첫 훑기 동안만)
@@ -352,10 +422,6 @@ struct Listing {
 }
 
 impl Listing {
-    fn photos(&self) -> u64 {
-        self.counts.iter().map(|&n| u64::from(n)).sum()
-    }
-
     fn mask(&self) -> u64 {
         self.counts.iter().enumerate().filter(|(_, n)| **n > 0).fold(0, |m, (g, _)| m | (1u64 << g))
     }
@@ -459,15 +525,16 @@ impl Walker {
         self.shared.verdicts.write().unwrap_or_else(|e| e.into_inner()).remove(dir);
     }
 
-    fn record_count(&mut self, dir: &Path, photos: u64) {
-        let old = self.counts.insert(dir.to_path_buf(), photos);
+    fn record_count(&mut self, dir: &Path, counts: &[u32]) {
+        let old = self.counts.insert(dir.to_path_buf(), counts.to_vec());
         let mut st = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
         if old.is_none() {
             st.dirs += 1;
         }
-        let old = old.unwrap_or(0);
-        st.photos = (st.photos + photos).saturating_sub(old);
-        st.photo_dirs = (st.photo_dirs + u64::from(photos > 0)).saturating_sub(u64::from(old > 0));
+        if let Some(o) = &old {
+            sub_counts(&mut st, o);
+        }
+        add_counts(&mut st, counts);
     }
 
     /// 사라진 폴더(와 하위)를 잊는다
@@ -481,8 +548,7 @@ impl Walker {
         for k in gone {
             if let Some(c) = self.counts.remove(&k) {
                 st.dirs = st.dirs.saturating_sub(1);
-                st.photos = st.photos.saturating_sub(c);
-                st.photo_dirs = st.photo_dirs.saturating_sub(u64::from(c > 0));
+                sub_counts(&mut st, &c);
             }
         }
     }
@@ -505,7 +571,7 @@ impl Walker {
             self.set_unreadable(dir);
             return Found::UNKNOWN;
         };
-        self.record_count(dir, l.photos());
+        self.record_count(dir, &l.counts);
         //#region 하위 판정 — 다른 루트·시스템 폴더는 들어가지 않고 이미 아는 결과(없으면 모름)를 쓴다
         // 표식은 매번 새로 합친다 (옛 값에 OR 하지 않음 — 마지막 PNG 를 지우면 PNG 비트가 빠져야 한다)
         let mut f = Found { mask: l.mask(), unknown: l.unknown_child };
@@ -544,7 +610,7 @@ impl Walker {
             self.set_unreadable(dir);
             return Found::UNKNOWN;
         };
-        self.record_count(dir, l.photos());
+        self.record_count(dir, &l.counts);
         if walk_new {
             let gone: Vec<PathBuf> = self.counts.keys().filter(|k| k.parent() == Some(dir) && !l.subdirs.contains(k)).cloned().collect();
             for g in gone {
@@ -892,6 +958,9 @@ mod tests {
         assert_eq!(s.counts_for(&c.join("mixdir"), png), Some((2, 0)));
         assert_eq!(s.counts_for(&c.join("mixdir"), jpg), Some((1, 0)));
         // 루트의 보일 하위: png 필터면 deep·mixdir + 링크(대상 판정)
+        let st = s.status();
+        assert_eq!((st.count(jpg), st.count(png)), (2, 3), "종류별 합계");
+        assert_eq!(st.dirs_with(png), 2);
         let (_, f_png) = s.counts_for(&c, png).unwrap();
         let (_, f_all) = s.counts_for(&c, ALL).unwrap();
         assert!(f_png < f_all, "{f_png} < {f_all}");

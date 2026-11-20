@@ -1,0 +1,17 @@
+[package]
+name = "iv-decode-video"
+description = "비디오 포스터(대표 장면) 디코더 — 썸네일·미리보기용 (macOS AVFoundation AVAssetImageGenerator)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+iv-decode-imageio.workspace = true
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-media = "0.3"
+objc2-av-foundation = { version = "0.3", features = ["objc2-core-media", "objc2-core-graphics", "objc2-core-foundation", "objc2-core-video"] }

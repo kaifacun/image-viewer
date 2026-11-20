@@ -13,6 +13,7 @@ path = "src/main.rs"
 iv-core.workspace = true
 iv-decode-image.workspace = true
 iv-decode-imageio.workspace = true
+iv-decode-video.workspace = true
 iv-pipeline.workspace = true
 iv-library.workspace = true
 iv-viewport.workspace = true

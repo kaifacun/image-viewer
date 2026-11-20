@@ -64,7 +64,7 @@ fn read_info(source: &CGImageSource) -> Result<([u32; 2], Orientation)> {
 }
 
 /// CGImage → RGBA8 sRGB straight-alpha 픽셀
-fn to_rgba8(img: &CGImage) -> Result<(u32, u32, Vec<u8>)> {
+pub fn to_rgba8(img: &CGImage) -> Result<(u32, u32, Vec<u8>)> {
     let w = CGImage::width(Some(img));
     let h = CGImage::height(Some(img));
     if w == 0 || h == 0 {

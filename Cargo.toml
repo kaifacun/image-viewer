@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*", "app/*"]
 
 [workspace.package]
-version = "0.4.11"
+version = "0.4.12"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
@@ -28,6 +28,7 @@ iv-scan = { path = "crates/iv-scan" }
 iv-fsops = { path = "crates/iv-fsops" }
 iv-rotate = { path = "crates/iv-rotate" }
 iv-clipboard = { path = "crates/iv-clipboard" }
+iv-decode-video = { path = "crates/iv-decode-video" }
 
 # 외부 — GPU/창/UI 는 egui 0.37 이 끌고 오는 버전에 정확히 맞춤
 egui = { version = "0.37", features = ["default_fonts"] }

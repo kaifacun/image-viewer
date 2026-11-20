@@ -19,6 +19,8 @@ pub struct UiModel<'a> {
     pub can_browse: bool,
     /// 저장하지 않은 회전이 있는가 (저장 버튼)
     pub rotated: bool,
+    /// 돌릴 수 있는가 (사진 모드만 — 비디오는 회전 버튼을 숨긴다)
+    pub can_rotate: bool,
 }
 
 fn panel_frame() -> Frame {
@@ -83,10 +85,10 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
                 btn(ui, "1:1", "원본 크기 (1)", Action::ActualSize);
                 btn(ui, "정보", "정보 (I)", Action::ToggleInfo);
                 ui.separator();
-                if icons::icon_button(ui, icons::Icon::RotateLeft, "왼쪽으로 90° (L)", m.has_image, false).clicked() {
+                if m.can_rotate && icons::icon_button(ui, icons::Icon::RotateLeft, "왼쪽으로 90° (L)", m.has_image, false).clicked() {
                     actions.push(Action::RotateCcw);
                 }
-                if icons::icon_button(ui, icons::Icon::RotateRight, "오른쪽으로 90° (R)", m.has_image, false).clicked() {
+                if m.can_rotate && icons::icon_button(ui, icons::Icon::RotateRight, "오른쪽으로 90° (R)", m.has_image, false).clicked() {
                     actions.push(Action::RotateCw);
                 }
                 if m.rotated

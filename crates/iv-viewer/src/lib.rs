@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use iv_core::formats::MediaKind;
 use iv_core::{Frame, Orientation};
 pub use iv_library::SortKey;
 use iv_library::{Entry, EntryId, Library};
@@ -99,6 +100,8 @@ pub enum Action {
     CopyPath,
     /// 확장자 필터 — 이 확장자의 사진만 보인다 (None·빈 목록 = 필터 없음)
     SetFilter(Option<Vec<&'static str>>),
+    /// 화면 종류 바꾸기 (사진 ↔ 비디오) — 필터는 풀고 목록을 그 종류로 다시 나열
+    SetKind(MediaKind),
 }
 
 /// 앱이 실행할 파일 작업
@@ -229,6 +232,9 @@ pub struct ViewerState {
     extensions: HashSet<&'static str>,
     /// 확장자 필터 (None = 전부). 목록을 여는 모든 곳은 [`Self::exts`] 를 쓴다.
     filter: Option<HashSet<&'static str>>,
+    /// 지금 보는 종류와 종류별 확장자 (비어 있으면 종류 구분 없이 `extensions` 전부)
+    kind: MediaKind,
+    kinds: Vec<(MediaKind, HashSet<&'static str>)>,
     /// 브라우저에서 선택된 항목들 (정렬해도 유지되게 id 로). 평범한 이동은 현재 항목 하나로 되돌린다.
     marked: HashSet<EntryId>,
     /// ⇧ 범위 선택의 기준 항목
@@ -264,6 +270,8 @@ impl ViewerState {
             generation: 0,
             extensions,
             filter: None,
+            kind: MediaKind::Image,
+            kinds: Vec::new(),
             marked: HashSet::new(),
             anchor: None,
             file_op: None,
@@ -273,12 +281,28 @@ impl ViewerState {
         }
     }
 
-    /// 목록에 넣을 확장자 (필터가 있으면 필터 ∩ 아는 확장자)
+    /// 목록에 넣을 확장자: 지금 종류의 확장자 (∩ 필터)
     fn exts(&self) -> HashSet<&'static str> {
+        let base = self.kinds.iter().find(|(k, _)| *k == self.kind).map_or(&self.extensions, |(_, e)| e);
         match &self.filter {
-            Some(f) => self.extensions.intersection(f).copied().collect(),
-            None => self.extensions.clone(),
+            Some(f) => base.intersection(f).copied().collect(),
+            None => base.clone(),
         }
+    }
+
+    /// 종류별 확장자를 알려 준다 (앱이 시작할 때 한 번)
+    pub fn set_kinds(&mut self, kinds: Vec<(MediaKind, HashSet<&'static str>)>) {
+        self.kinds = kinds;
+    }
+
+    pub fn kind(&self) -> MediaKind {
+        self.kind
+    }
+
+    /// 확장자의 종류
+    fn kind_of_path(&self, p: &Path) -> Option<MediaKind> {
+        let ext = p.extension()?.to_str()?.to_ascii_lowercase();
+        self.kinds.iter().find(|(_, e)| e.contains(ext.as_str())).map(|(k, _)| *k)
     }
 
     /// 지금 걸린 확장자 필터
@@ -351,6 +375,13 @@ impl ViewerState {
     /// 파일이면 전체 보기, 폴더면 브라우저로 연다.
     pub fn open(&mut self, path: &Path, loader: &Loader) -> Effects {
         let is_dir = path.is_dir();
+        // 파일을 직접 열면 그 파일의 종류로 바꾼다 (비디오 파일 → 비디오 모드)
+        if !is_dir {
+            if let Some(k) = self.kind_of_path(path).filter(|k| *k != self.kind) {
+                self.kind = k;
+                self.filter = None;
+            }
+        }
         let mode = if is_dir && self.browse_available { Mode::Browse } else { Mode::View };
         match Library::open(path, &self.exts()) {
             Ok(lib) => {
@@ -486,7 +517,8 @@ impl ViewerState {
     }
 
     fn rotate(&mut self, delta: u8) -> Effects {
-        if self.mode != Mode::View || self.library.current().is_none() {
+        // 회전 저장은 사진 방향 태그 — 비디오는 돌리지 않는다
+        if self.mode != Mode::View || self.library.current().is_none() || self.kind != MediaKind::Image {
             return Effects::default();
         }
         self.set_turns(self.turns + delta)
@@ -619,6 +651,26 @@ impl ViewerState {
                 }
                 self.request(FileOp::MoveTo { dest })
             }
+            Action::SetKind(k) => {
+                if k == self.kind {
+                    return Effects::default();
+                }
+                self.kind = k;
+                self.filter = None;
+                let _ = self.set_turns(0);
+                if self.browse_available {
+                    self.mode = Mode::Browse;
+                }
+                match self.library.dir().map(Path::to_path_buf) {
+                    Some(d) => {
+                        let mut fx = self.open(&d, loader);
+                        self.mode = if self.browse_available { Mode::Browse } else { self.mode };
+                        fx.library_changed = true;
+                        fx
+                    }
+                    None => Effects::redraw(),
+                }
+            }
             Action::SetFilter(f) => {
                 let f: Option<HashSet<&'static str>> = f.filter(|v| !v.is_empty()).map(|v| v.into_iter().collect());
                 if f == self.filter {
@@ -636,7 +688,7 @@ impl ViewerState {
                 fx
             }
             Action::RotateMarked(q) => {
-                if self.mode != Mode::Browse || q % 4 == 0 || self.trash_targets().is_empty() {
+                if self.mode != Mode::Browse || q % 4 == 0 || self.kind != MediaKind::Image || self.trash_targets().is_empty() {
                     return Effects::default();
                 }
                 self.request(FileOp::RotateMarked { quarters: q % 4 })
