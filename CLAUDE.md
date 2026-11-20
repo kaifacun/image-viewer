@@ -42,7 +42,7 @@
 - **자가 시험 창은 포커스를 뺏지 않고(`with_active(false)`) 실제 키보드·마우스를 무시한다** — 예전엔 사용자가 터미널에서 친 ⌫ 가 시험 창에 들어가 상위 폴더로 올라간 뒤 사용자 파일을 지웠다. 휴지통 시험은 `IV_TRASH_DIR=scratch/trash-bin` + 사본 폴더(`scratch/trash-test`)로만, 시험 중 휴지통은 `IV_TREE_ROOTS` 밖 파일을 거부한다.
 - **스캔 판정은 3상태 — 모르면 숨기지 않는다**: 건너뛴 하위(링크·다른 루트·시스템 폴더·읽기 오류)가 있고 사진을 못 찾으면 Unknown. 사진 규칙은 격자(`Library::open`), 폴더 규칙은 트리(`list_subdirs`: 점 폴더·번들 제외)와 같아야 한다. 열린 폴더와 조상은 숨기지 않는다. 시험은 `wait-scan:ms`, 캡처 로그 끝에 스캔 상태.
 - FSEvents 는 `iv-scan/src/watch.rs` 직접 FFI(SDK `FSEvents.h` 기준, 콜백은 채널에 넣기만). `/` 루트는 감시 안 함(시스템 변경 폭주), 썸네일 캐시·~/Library·점 폴더 이벤트는 버린다. 열린 폴더 자동 새로고침은 브라우저 모드에서 목록이 실제로 달라졌을 때만(`refresh_if_changed`) — 전체 보기 확대 상태 보호.
-- 스캔 스레드는 **QoS utility** (background 는 I/O 조임으로 stat 하나 1.4ms → 5만 폴더 78초, utility 는 11초). 결과는 `<캐시>/scan-v1.tsv` 에 저장 — 다음 실행은 폴더 mtime 만 확인하고 바뀐 폴더만 다시 나열. 저장은 '완료' 공개 **전에** (시험이 완료 보고 바로 끝내면 저장이 잘린다). 첫 스캔 동안 그동안 트리가 바뀌므로 **트리 줄은 `push_id(path)` 로 id 고정 + 갱신은 초당 1회·포인터 안 눌렸을 때만**(아니면 클릭이 사라진다).
+- 스캔 스레드는 **QoS utility** (background 는 I/O 조임으로 stat 하나 1.4ms → 5만 폴더 78초, utility 는 11초). 결과는 `<캐시>/scan-v1.tsv` 에 저장 — 다음 실행은 폴더 mtime 만 확인하고 바뀐 폴더만 다시 나열. 저장은 '완료' 공개 **전에** (시험이 완료 보고 바로 끝내면 저장이 잘린다). 스캔 중엔 트리가 바뀌므로 **트리 줄은 `push_id(path)` 로 id 고정 + 갱신은 초당 1회·포인터 안 눌렸을 때만**(아니면 클릭이 사라진다).
 - 사용자 홈 전체 스캔은 직접 돌리지 않는다(시험은 `IV_TREE_ROOTS=scratch`).
 - 휴지통은 `iv-trash`(NSFileManager `trashItemAtURL`). 실패 시 `remove_file` 로 대체 금지.
 - 자가 시험 실입력: `click=x,y` `dblclick=x,y` `cmdclick:x,y` `shiftclick:x,y`(egui ModifiersChanged 주입) `scroll=x,y,dy`(점 좌표, egui 맞음 판정 경유), `key=right|enter|escape…`(단축키 표 경유), `wait-thumbs:ms`, `act:folder=|select=|activate=|toggle=|range=|selectall|trash|sort=size,desc|view|browse`.
