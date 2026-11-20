@@ -1,0 +1,11 @@
+[package]
+name = "iv-pipeline"
+description = "디코드 작업 큐·미리 읽기·메모리 상한 LRU (디코더·UI 무관)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+parking_lot.workspace = true
+log.workspace = true

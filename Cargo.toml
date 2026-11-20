@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "app/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+# 내부 crate
+iv-core = { path = "crates/iv-core" }
+iv-decode-image = { path = "crates/iv-decode-image" }
+iv-decode-imageio = { path = "crates/iv-decode-imageio" }
+iv-pipeline = { path = "crates/iv-pipeline" }
+iv-library = { path = "crates/iv-library" }
+iv-viewport = { path = "crates/iv-viewport" }
+iv-render = { path = "crates/iv-render" }
+iv-ui = { path = "crates/iv-ui" }
+iv-imageops = { path = "crates/iv-imageops" }
+iv-viewer = { path = "crates/iv-viewer" }
+iv-render-wgpu = { path = "crates/iv-render-wgpu" }
+iv-render-cpu = { path = "crates/iv-render-cpu" }
+iv-fstree = { path = "crates/iv-fstree" }
+iv-thumbs = { path = "crates/iv-thumbs" }
+
+# 외부 — GPU/창/UI 는 egui 0.37 이 끌고 오는 버전에 정확히 맞춤
+egui = { version = "0.37", features = ["default_fonts"] }
+egui-wgpu = "0.37"
+egui-winit = "0.37"
+wgpu = "30"
+winit = "0.30"
+image = { version = "0.25", default-features = false }
+kamadak-exif = "0.6"
+parking_lot = "0.12"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+# 디버그 빌드에서도 디코드 속도가 의미 있도록 의존 crate 는 최적화
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# 픽셀 루프가 있는 우리 crate 도 디버그 빌드에서 최적화 (CPU 렌더러 체감 속도)
+[profile.dev.package.iv-render-cpu]
+opt-level = 3
+[profile.dev.package.iv-imageops]
+opt-level = 3

@@ -1,0 +1,31 @@
+[package]
+name = "iv"
+description = "빠른 이미지 뷰어 — 유일한 조립 지점"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "iv"
+path = "src/main.rs"
+
+[dependencies]
+iv-core.workspace = true
+iv-decode-image.workspace = true
+iv-decode-imageio.workspace = true
+iv-pipeline.workspace = true
+iv-library.workspace = true
+iv-viewport.workspace = true
+iv-viewer.workspace = true
+iv-render.workspace = true
+iv-render-wgpu.workspace = true
+iv-render-cpu.workspace = true
+iv-ui.workspace = true
+iv-thumbs.workspace = true
+iv-fstree.workspace = true
+egui.workspace = true
+egui-winit.workspace = true
+winit.workspace = true
+image = { workspace = true, features = ["png"] }
+log.workspace = true
+env_logger.workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "iv-decode-image"
+description = "image 크레이트 기반 범용 디코더 (순수 Rust, 전 플랫폼)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+image = { workspace = true, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "ico", "tga", "pnm", "qoi", "rayon"] }
+kamadak-exif.workspace = true
+iv-imageops.workspace = true
+log.workspace = true

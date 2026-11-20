@@ -1,0 +1,17 @@
+[package]
+name = "iv-render-cpu"
+description = "CPU 폴백 렌더러 (softbuffer 표시 + CPU 리샘플링) — GPU 를 쓸 수 없을 때"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+iv-render.workspace = true
+iv-viewport.workspace = true
+iv-imageops.workspace = true
+softbuffer = "0.4"
+raw-window-handle = "0.6"
+rayon = "1"
+log.workspace = true
+egui.workspace = true

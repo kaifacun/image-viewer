@@ -1,0 +1,10 @@
+[package]
+name = "iv-library"
+description = "폴더 스캔·정렬·현재 위치"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+log.workspace = true

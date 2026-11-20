@@ -1,0 +1,10 @@
+[package]
+name = "iv-core"
+description = "포맷·GPU·UI 무관 공용 타입과 Decoder trait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true

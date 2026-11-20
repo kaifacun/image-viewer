@@ -1,0 +1,18 @@
+[package]
+name = "iv-viewer"
+description = "winit 무관 뷰어 상태 + Action 처리기"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+iv-library.workspace = true
+iv-pipeline.workspace = true
+iv-viewport.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+iv-decode-image.workspace = true
+iv-decode-imageio.workspace = true
+image = { workspace = true, features = ["png"] }

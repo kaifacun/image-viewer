@@ -1,0 +1,738 @@
+//! winit 이벤트 루프 — 입력을 Action 으로, 파이프라인·썸네일 결과를 뷰어로, 장면을 렌더러로 잇는다.
+//!
+//! 두 화면: 브라우저(트리·격자·미리보기) ↔ 전체 보기. 모드는 `ViewerState::mode` 하나가 진실이다.
+
+use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use iv_core::DecoderRegistry;
+use iv_fstree::FolderTree;
+use iv_library::EntryId;
+use iv_pipeline::{Loader, LoaderConfig};
+use iv_render::{EguiPaint, RenderOutcome, Renderer, Scene, UiCapability};
+use iv_thumbs::{ThumbConfig, ThumbEvent, ThumbRequest, ThumbService};
+use iv_ui::browser::{BrowserModel, BrowserState};
+use iv_viewer::{Action, AppRequest, Effects, Mode, ViewerConfig, ViewerState};
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::keyboard::ModifiersState;
+use winit::window::{Fullscreen, Window, WindowId};
+
+use crate::args::{Args, RendererLevel};
+use crate::selftest::{SelfTest, Step};
+use crate::{input, renderer};
+
+/// 백그라운드 → 메인 스레드 신호
+#[derive(Debug, Clone, Copy)]
+pub enum UserEvent {
+    /// 파이프라인에 결과가 쌓였다
+    LoaderWake,
+    /// 썸네일 서비스에 결과가 쌓였다
+    ThumbWake,
+}
+
+const BACKGROUND: [u8; 3] = [24, 24, 26];
+
+pub fn run(args: Args, registry: DecoderRegistry) {
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("이벤트 루프 생성 실패");
+    event_loop.set_control_flow(ControlFlow::Wait);
+    let proxy = event_loop.create_proxy();
+    let mut app = App::new(args, registry, proxy);
+    if let Err(e) = event_loop.run_app(&mut app) {
+        log::error!("이벤트 루프 오류: {e}");
+    }
+}
+
+struct Gfx {
+    window: Arc<Window>,
+    renderer: Box<dyn Renderer>,
+    level: RendererLevel,
+    egui: Option<(egui::Context, egui_winit::State)>,
+}
+
+struct App {
+    args: Args,
+    loader: Loader,
+    thumbs: ThumbService,
+    viewer: ViewerState,
+    tree: FolderTree,
+    browser: BrowserState,
+    /// 썸네일 생성에 실패한 항목 (타일 경고·재요청 제외)
+    thumb_failed: HashSet<u64>,
+    /// 직전에 썸네일 서비스에 보낸 키 목록 — 달라질 때만 다시 보낸다
+    last_requested: Vec<u64>,
+    /// 썸네일 텍스처가 속한 폴더 (바뀌면 비움)
+    textures_dir: Option<PathBuf>,
+    /// 미리보기 칸 (물리 px, 직전 egui 레이아웃)
+    preview_area: Option<[f32; 4]>,
+    gfx: Option<Gfx>,
+    mods: ModifiersState,
+    cursor: PhysicalPosition<f64>,
+    dragging: Option<PhysicalPosition<f64>>,
+    last_click: Option<Instant>,
+    /// egui 가 요청한 다음 다시 그리기 시각
+    repaint_at: Option<Instant>,
+    info_rows: Vec<(String, String)>,
+    pending_open: Option<PathBuf>,
+    selftest: Option<SelfTest>,
+    /// 자가 시험이 주입할 egui 입력 (프레임마다 한 묶음)
+    injected: VecDeque<Vec<egui::Event>>,
+    wait_thumbs_until: Option<Instant>,
+    /// 연속 표면 재구성 횟수 — 계속되면 렌더러를 다시 만든다
+    reconfigures: u32,
+}
+
+impl App {
+    fn new(args: Args, registry: DecoderRegistry, proxy: EventLoopProxy<UserEvent>) -> Self {
+        let registry = Arc::new(registry);
+        let extensions = registry.known_extensions();
+        let loader_cfg = LoaderConfig::default();
+        let gate = loader_cfg.gate.clone();
+        let p1 = proxy.clone();
+        let loader = Loader::new(registry.clone(), loader_cfg, move || {
+            let _ = p1.send_event(UserEvent::LoaderWake);
+        });
+        let thumbs = ThumbService::new(registry, ThumbConfig { gate: Some(gate), ..Default::default() }, move || {
+            let _ = proxy.send_event(UserEvent::ThumbWake);
+        });
+        let viewer = ViewerState::new([1280.0, 800.0], extensions, ViewerConfig::default());
+        // 인자 없으면 시작 폴더(IV_START_DIR → 홈)를 브라우저로
+        let pending_open = args.path.clone().or_else(|| std::env::var_os("IV_START_DIR").or_else(|| std::env::var_os("HOME")).map(PathBuf::from));
+        Self {
+            args,
+            loader,
+            thumbs,
+            viewer,
+            tree: FolderTree::new(FolderTree::default_roots()),
+            browser: BrowserState::default(),
+            thumb_failed: HashSet::new(),
+            last_requested: Vec::new(),
+            textures_dir: None,
+            preview_area: None,
+            gfx: None,
+            mods: ModifiersState::empty(),
+            cursor: PhysicalPosition::new(0.0, 0.0),
+            dragging: None,
+            last_click: None,
+            repaint_at: None,
+            info_rows: Vec::new(),
+            pending_open,
+            selftest: SelfTest::from_env(),
+            injected: VecDeque::new(),
+            wait_thumbs_until: None,
+            reconfigures: 0,
+        }
+    }
+
+    fn apply(&mut self, fx: Effects, el: &ActiveEventLoop) {
+        // 전체 보기 중엔 썸네일 생성을 멈춘다 (멱등 — 시작 모드·모든 전환을 한 곳에서)
+        self.thumbs.set_paused(self.viewer.mode == Mode::View);
+        if fx.library_changed {
+            let dir = self.viewer.library.dir().map(|d| d.to_path_buf());
+            if dir != self.textures_dir {
+                self.browser.textures.clear();
+                self.thumb_failed.clear();
+                // 실패 기록은 폴더 단위로 잊는다 (누적 방지 · 돌아오면 한 번 더 시도)
+                self.thumbs.forget_failures();
+                self.textures_dir = dir.clone();
+            }
+            self.last_requested.clear();
+            if let Some(d) = &dir {
+                self.tree.expand_to(d);
+            }
+        }
+        if fx.reveal && !self.viewer.library.is_empty() {
+            self.browser.scroll_to = Some(self.viewer.library.index());
+        }
+        if fx.window_changed {
+            self.loader.set_window(&self.viewer.window());
+        }
+        if let Some(req) = fx.app {
+            match req {
+                AppRequest::Quit => el.exit(),
+                AppRequest::ToggleFullscreen => {
+                    if let Some(g) = &self.gfx {
+                        let fs = g.window.fullscreen().is_some();
+                        g.window.set_fullscreen(if fs { None } else { Some(Fullscreen::Borderless(None)) });
+                    }
+                }
+            }
+        }
+        if fx.redraw || fx.window_changed || fx.library_changed || fx.reveal {
+            self.update_title();
+            if let Some(g) = &self.gfx {
+                g.window.request_redraw();
+            }
+        }
+    }
+
+    /// 창이 있는 모니터의 긴 변 (물리 픽셀)
+    fn monitor_side(&self) -> Option<u32> {
+        let m = self.gfx.as_ref()?.window.current_monitor()?;
+        let s = m.size();
+        Some(s.width.max(s.height))
+    }
+
+    fn handle(&mut self, a: Action, el: &ActiveEventLoop) {
+        if a == Action::Refresh {
+            // 새로고침 = 고쳐졌을 수 있는 파일의 썸네일을 다시 시도
+            self.thumbs.forget_failures();
+            self.thumb_failed.clear();
+        }
+        let fx = self.viewer.handle(a, &self.loader);
+        self.apply(fx, el);
+    }
+
+    fn renderer_name(&self) -> String {
+        self.gfx.as_ref().map(|g| g.renderer.name().to_string()).unwrap_or_default()
+    }
+
+    fn status(&self) -> String {
+        let r = self.renderer_name();
+        match self.viewer.mode {
+            Mode::View => self.viewer.status_line(&r),
+            Mode::Browse => {
+                let size = self.viewer.current().and_then(|e| self.browser.textures.full_size(e.id.0));
+                self.viewer.browse_status(size, &r)
+            }
+        }
+    }
+
+    fn update_title(&mut self) {
+        let Some(g) = &self.gfx else { return };
+        let title = match (self.viewer.mode, self.viewer.current()) {
+            (Mode::View, Some(e)) => format!("{} — iv", e.name),
+            (Mode::Browse, _) => match self.viewer.library.dir() {
+                Some(d) => format!("{} — iv", iv_fstree::display_name(d)),
+                None => "iv".to_string(),
+            },
+            _ => "iv".to_string(),
+        };
+        // UI 를 못 그리는 렌더러(CPU)는 상태 전체를 제목에 싣는다
+        let title = if g.renderer.ui_capability() == UiCapability::StatusOnly { self.status() } else { title };
+        g.window.set_title(&title);
+    }
+
+    fn refresh_info(&mut self) {
+        self.info_rows.clear();
+        let Some(e) = self.viewer.current() else { return };
+        self.info_rows.push(("파일".into(), e.name.clone()));
+        if let Some(dir) = self.viewer.library.dir() {
+            self.info_rows.push(("폴더".into(), dir.display().to_string()));
+        }
+        if let Some(s) = &self.viewer.shown {
+            let [w, h] = s.frame.display_full_size();
+            self.info_rows.push(("원본".into(), format!("{w} × {h}")));
+            self.info_rows.push(("디코드".into(), format!("{} × {}{}", s.frame.width, s.frame.height, if s.frame.is_preview { " (미리보기)" } else { "" })));
+            self.info_rows.push(("방향".into(), format!("{:?}", s.frame.orientation)));
+        }
+        let (cache, queued, running) = self.loader.stats();
+        self.info_rows.push(("캐시".into(), format!("{} MB / {} MB · {}장", cache.bytes >> 20, cache.limit >> 20, cache.frames)));
+        self.info_rows.push(("작업".into(), format!("대기 {queued} · 진행 {running}")));
+        let (tb, tn, tq, tr) = self.thumbs.stats();
+        self.info_rows.push(("썸네일".into(), format!("{} MB · {}장 · 대기 {tq} · 진행 {tr}", tb >> 20, tn)));
+        if let Some(g) = &self.gfx {
+            self.info_rows.push(("렌더러".into(), g.renderer.name().to_string()));
+        }
+    }
+
+    /// 한 프레임: UI → 장면 → 렌더 (또는 캡처). redraw 와 자가 시험 캡처가 같은 길을 쓴다.
+    fn frame(&mut self, el: &ActiveEventLoop, capture: Option<PathBuf>) {
+        if self.viewer.show_info {
+            self.refresh_info();
+        }
+        let status = self.status();
+        let (ui, ui_actions) = self.build_ui(&status);
+        let Some(g) = &mut self.gfx else { return };
+        let cur = self.viewer.current().map(|e| e.id.0);
+        let browse = self.viewer.mode == Mode::Browse;
+        let image = self.viewer.shown.as_ref().filter(|s| !browse || Some(s.key) == cur).map(|s| (s.key, &s.frame));
+        let scene = if browse {
+            // 미리보기 칸이 아직 없으면 빈 영역 (None 이면 화면 전체에 그려진다)
+            Scene { viewport: &self.viewer.preview, image, image_area: Some(self.preview_area.unwrap_or([0.0; 4])), background: BACKGROUND, ui }
+        } else {
+            Scene { viewport: &self.viewer.viewport, image, image_area: None, background: BACKGROUND, ui }
+        };
+        if let Some(path) = capture {
+            match g.renderer.capture(scene) {
+                Some((w, h, px)) => {
+                    let ok = image::save_buffer(&path, &px, w, h, image::ExtendedColorType::Rgba8).is_ok();
+                    log::info!("자가 시험 캡처 {} {w}x{h} {} | {status}", path.display(), if ok { "저장" } else { "실패" });
+                }
+                None => log::warn!("자가 시험 캡처 실패"),
+            }
+        } else {
+            let outcome = g.renderer.render(scene);
+            log::trace!("render → {outcome:?}");
+            match outcome {
+                RenderOutcome::Ok | RenderOutcome::Skipped => self.reconfigures = 0,
+                RenderOutcome::Reconfigure => {
+                    self.reconfigures += 1;
+                    if self.reconfigures > 3 {
+                        // 표면이 계속 사라지면(Lost) 같은 단계 렌더러를 새로 만든다
+                        log::warn!("표면 재구성 반복 → 렌더러 재생성");
+                        self.reconfigures = 0;
+                        let level = g.level;
+                        self.switch_renderer(level);
+                    } else {
+                        let s = g.window.inner_size();
+                        g.renderer.resize([s.width, s.height]);
+                        g.window.request_redraw();
+                    }
+                }
+                RenderOutcome::DeviceLost(why) => {
+                    log::error!("렌더러 장치 손실: {why}");
+                    if let Some(next) = renderer::next_level(g.level) {
+                        self.switch_renderer(next);
+                    }
+                }
+            }
+        }
+        for a in ui_actions {
+            self.handle(a, el);
+        }
+    }
+
+    /// egui 한 프레임을 돌려 그리기 목록과 버튼 Action 을 만든다
+    fn build_ui(&mut self, status: &str) -> (Option<EguiPaint>, Vec<Action>) {
+        let mut ui_actions = Vec::new();
+        let Some(g) = &mut self.gfx else { return (None, ui_actions) };
+        let Some((ctx, state)) = &mut g.egui else { return (None, ui_actions) };
+        let mut raw = state.take_egui_input(&g.window);
+        if let Some(batch) = self.injected.pop_front() {
+            raw.events.extend(batch);
+            g.window.request_redraw();
+        }
+        let browse = self.viewer.mode == Mode::Browse;
+        let mut bout = None;
+        let out = if browse {
+            let tree_rows = self.tree.visible_rows();
+            let lib = &self.viewer.library;
+            let cur = lib.current().map(|e| e.id.0);
+            let model = BrowserModel {
+                entries: lib.entries(),
+                selected: (!lib.is_empty()).then(|| lib.index()),
+                dir: lib.dir(),
+                tree: &tree_rows,
+                status,
+                sort: lib.sort_order(),
+                failed: &self.thumb_failed,
+                preview_has_frame: self.viewer.shown.as_ref().is_some_and(|s| Some(s.key) == cur),
+            };
+            let browser = &mut self.browser;
+            ctx.run_pass(raw, |ctx| bout = Some(iv_ui::browser::draw(ctx, browser, &model)))
+        } else {
+            let model = iv_ui::UiModel {
+                status,
+                show_info: self.viewer.show_info,
+                info: &self.info_rows,
+                has_image: self.viewer.current().is_some(),
+                can_browse: self.viewer.browse_available,
+            };
+            ctx.run_pass(raw, |ctx| ui_actions = iv_ui::draw(ctx, &model))
+        };
+        state.handle_platform_output(&g.window, out.platform_output);
+        let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay).unwrap_or(Duration::MAX);
+        self.repaint_at = (delay < Duration::from_secs(10)).then(|| Instant::now() + delay);
+        let ppp = out.pixels_per_point;
+        let primitives = ctx.tessellate(out.shapes, ppp);
+        let paint = EguiPaint { primitives, textures_delta: out.textures_delta, pixels_per_point: ppp };
+        if let Some(b) = bout {
+            ui_actions.extend(b.actions);
+            let window = g.window.clone();
+            self.after_browser(b.tree_toggle, b.visible, b.preview_rect.map(|r| [r.min.x * ppp, r.min.y * ppp, r.max.x * ppp, r.max.y * ppp]), b.grid_cols, b.grid_rows_visible, &window);
+        }
+        (Some(paint), ui_actions)
+    }
+
+    /// 브라우저 레이아웃 결과 반영: 트리 펼침, 미리보기 칸, 격자 열 수, 썸네일 요청
+    fn after_browser(&mut self, toggle: Option<PathBuf>, visible: std::ops::Range<usize>, area: Option<[f32; 4]>, cols: usize, rows: usize, window: &Window) {
+        let mut redraw = false;
+        if let Some(p) = toggle {
+            self.tree.toggle(&p);
+            redraw = true;
+        }
+        if area != self.preview_area {
+            self.preview_area = area;
+            if let Some([x0, y0, x1, y1]) = area {
+                let _ = self.viewer.set_preview_screen([(x1 - x0).max(1.0), (y1 - y0).max(1.0)]);
+            }
+            redraw = true;
+        }
+        self.viewer.grid_cols = cols;
+        self.viewer.grid_rows_visible = rows;
+        // 보이는 항목 키 목록이 바뀌었을 때만 요청 (스크롤·정렬·열 수·폴더 변경을 한 규칙으로)
+        let entries = self.viewer.library.entries();
+        let vis = &entries[visible.start.min(entries.len())..visible.end.min(entries.len())];
+        let keys: Vec<u64> = vis.iter().map(|e| e.id.0).collect();
+        // 메모리 캐시에 있는 것은 바로 텍스처로
+        for e in vis {
+            let k = e.id.0;
+            if !self.browser.textures.has(k) {
+                if let Some(t) = self.thumbs.get(k) {
+                    self.browser.textures.push(k, t.image, t.full_size);
+                    redraw = true;
+                } else if !self.thumb_failed.contains(&k) && self.thumbs.failed(k).is_some() {
+                    self.thumb_failed.insert(k);
+                }
+            }
+        }
+        if keys != self.last_requested {
+            let reqs: Vec<ThumbRequest> = vis
+                .iter()
+                .filter(|e| !self.browser.textures.has(e.id.0) && !self.thumb_failed.contains(&e.id.0))
+                .map(|e| ThumbRequest { key: e.id.0, src: e.source.clone(), mtime: e.mtime, len: e.len })
+                .collect();
+            self.thumbs.request(&reqs);
+            self.last_requested = keys;
+        }
+        if redraw || self.browser.textures.has_pending() {
+            window.request_redraw();
+        }
+    }
+
+    /// 보이는 썸네일이 다 찼는가 (자가 시험 wait-thumbs)
+    fn thumbs_complete(&self) -> bool {
+        let lib = &self.viewer.library;
+        if lib.is_empty() {
+            return true;
+        }
+        !self.last_requested.is_empty()
+            && !self.browser.textures.has_pending()
+            && self.last_requested.iter().all(|k| self.browser.textures.has(*k) || self.thumb_failed.contains(k))
+            && lib.entries().len() >= self.last_requested.len()
+    }
+
+    /// 자가 시험 단계 실행
+    fn run_selftest(&mut self, el: &ActiveEventLoop) -> Option<Instant> {
+        if let Some(until) = self.wait_thumbs_until {
+            if Instant::now() < until && !self.thumbs_complete() {
+                return Some(Instant::now() + Duration::from_millis(30));
+            }
+            log::info!("자가 시험: 썸네일 {}", if self.thumbs_complete() { "모두 채워짐" } else { "시간 초과" });
+            self.wait_thumbs_until = None;
+        }
+        // 주입한 입력이 다 소화될 때까지 다음 단계를 미룬다
+        if !self.injected.is_empty() {
+            if let Some(g) = &self.gfx {
+                g.window.request_redraw();
+            }
+            return Some(Instant::now() + Duration::from_millis(16));
+        }
+        loop {
+            let (step, wake) = self.selftest.as_mut()?.next();
+            let Some(step) = step else { return wake };
+            log::info!("자가 시험: {step:?}");
+            let none = egui::Modifiers::default();
+            match step {
+                Step::Act(a) => self.handle(a, el),
+                Step::Quit => el.exit(),
+                Step::Resize(w, h) => {
+                    if let Some(g) = &self.gfx {
+                        let _ = g.window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+                    }
+                }
+                Step::DeviceLost => {
+                    let next = self.gfx.as_ref().and_then(|g| renderer::next_level(g.level));
+                    if let Some(n) = next {
+                        self.switch_renderer(n);
+                    }
+                }
+                Step::Capture(path) => self.frame(el, Some(path)),
+                Step::Click(x, y) | Step::DoubleClick(x, y) => {
+                    let pos = egui::pos2(x, y);
+                    let press = |p: bool| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: p, modifiers: none };
+                    self.injected.push_back(vec![egui::Event::PointerMoved(pos)]);
+                    self.injected.push_back(vec![press(true), press(false)]);
+                    if matches!(step, Step::DoubleClick(..)) {
+                        self.injected.push_back(vec![press(true), press(false)]);
+                    }
+                    self.injected.push_back(vec![]);
+                    if let Some(g) = &self.gfx {
+                        g.window.request_redraw();
+                    }
+                    return Some(Instant::now() + Duration::from_millis(16));
+                }
+                Step::Scroll(x, y, dy) => {
+                    let pos = egui::pos2(x, y);
+                    self.injected.push_back(vec![egui::Event::PointerMoved(pos)]);
+                    self.injected.push_back(vec![egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0.0, dy),
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        modifiers: none,
+                    }]);
+                    self.injected.push_back(vec![]);
+                    if let Some(g) = &self.gfx {
+                        g.window.request_redraw();
+                    }
+                    return Some(Instant::now() + Duration::from_millis(16));
+                }
+                Step::Key(name) => match input::named(&name) {
+                    // 실제 입력과 같은 관문: 글 입력 칸에 포커스가 있으면 키는 egui 몫 (앱 단축키로 새지 않음)
+                    Some(_) if self.gfx.as_ref().and_then(|g| g.egui.as_ref()).is_some_and(|(ctx, _)| ctx.text_edit_focused()) => {
+                        if let Some(key) = egui::Key::from_name(&name).or(match name.as_str() {
+                            "backspace" => Some(egui::Key::Backspace),
+                            "enter" => Some(egui::Key::Enter),
+                            "escape" | "esc" => Some(egui::Key::Escape),
+                            _ => None,
+                        }) {
+                            let ev = |pressed| egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: none };
+                            self.injected.push_back(vec![ev(true), ev(false)]);
+                            self.injected.push_back(vec![]);
+                            if let Some(g) = &self.gfx {
+                                g.window.request_redraw();
+                            }
+                        }
+                        log::info!("자가 시험: 키 {name} → 글 입력 칸 (단축키 아님)");
+                        return Some(Instant::now() + Duration::from_millis(16));
+                    }
+                    Some(k) => {
+                        let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
+                        if let Some(a) = input::key_action(&k, ModifiersState::empty(), fullscreen, self.viewer.mode) {
+                            self.handle(a, el);
+                        }
+                    }
+                    None => log::warn!("자가 시험: 알 수 없는 키 {name}"),
+                },
+                Step::WaitThumbs(ms) => {
+                    self.wait_thumbs_until = Some(Instant::now() + Duration::from_millis(ms));
+                    return Some(Instant::now() + Duration::from_millis(30));
+                }
+                Step::Wait(_) => {}
+            }
+        }
+    }
+
+    fn switch_renderer(&mut self, level: RendererLevel) {
+        let Some(g) = &mut self.gfx else { return };
+        let window = g.window.clone();
+        // 기존 렌더러(표면)를 먼저 내려놓는다
+        let placeholder: Box<dyn Renderer> = Box::new(iv_render_cpu::offscreen([1, 1]));
+        drop(std::mem::replace(&mut g.renderer, placeholder));
+        let (r, lv) = renderer::create(&window, level);
+        g.renderer = r;
+        g.level = lv;
+        g.egui = make_egui(&window, g.renderer.as_ref());
+        // 새 egui 컨텍스트 → 썸네일 텍스처·스크롤 위치가 사라진다: 다시 올리고 선택 항목으로 스크롤
+        let sel = (!self.viewer.library.is_empty()).then(|| self.viewer.library.index());
+        self.browser.reset_context(sel);
+        self.last_requested.clear();
+        self.viewer.config.max_texture_side = g.renderer.max_texture_side();
+        self.set_browse_available();
+        // 텍스처 한도가 바뀌었으니 필요한 해상도를 다시 알린다
+        self.loader.set_window(&self.viewer.window());
+        self.update_title();
+        window.request_redraw();
+    }
+
+    /// UI 를 못 그리는 렌더러면 브라우저 대신 전체 보기로만
+    fn set_browse_available(&mut self) {
+        let full = self.gfx.as_ref().is_some_and(|g| g.renderer.ui_capability() == UiCapability::Full);
+        self.viewer.browse_available = full;
+        if !full && self.viewer.mode == Mode::Browse {
+            self.viewer.mode = Mode::View;
+            self.thumbs.set_paused(true);
+        }
+    }
+}
+
+fn make_egui(window: &Window, r: &dyn Renderer) -> Option<(egui::Context, egui_winit::State)> {
+    if r.ui_capability() != UiCapability::Full {
+        return None;
+    }
+    let ctx = egui::Context::default();
+    ctx.set_visuals(egui::Visuals::dark());
+    iv_ui::install_fonts(&ctx);
+    let state = egui_winit::State::new(
+        ctx.clone(),
+        egui::ViewportId::ROOT,
+        window,
+        Some(window.scale_factor() as f32),
+        None,
+        Some(r.max_texture_side() as usize),
+    );
+    Some((ctx, state))
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.gfx.is_some() {
+            return;
+        }
+        let attrs = Window::default_attributes().with_title("iv").with_inner_size(LogicalSize::new(1280.0, 820.0));
+        let window = Arc::new(el.create_window(attrs).expect("창 생성 실패"));
+        let (renderer, level) = renderer::create(&window, self.args.renderer);
+        let egui = make_egui(&window, renderer.as_ref());
+        self.viewer.config.max_texture_side = renderer.max_texture_side();
+        self.viewer.config.display_side = window.current_monitor().map(|m| m.size().width.max(m.size().height));
+        let size = window.inner_size();
+        let _ = self.viewer.set_screen([size.width as f32, size.height as f32]);
+        self.gfx = Some(Gfx { window, renderer, level, egui });
+        self.set_browse_available();
+        if let Some(p) = self.pending_open.take() {
+            let fx = self.viewer.open(&p, &self.loader);
+            self.apply(fx, el);
+        }
+        self.update_title();
+        if let Some(g) = &self.gfx {
+            g.window.request_redraw();
+        }
+    }
+
+    fn user_event(&mut self, el: &ActiveEventLoop, ev: UserEvent) {
+        match ev {
+            UserEvent::LoaderWake => {
+                let mut fx = Effects::default();
+                for e in self.loader.drain() {
+                    fx = fx.merge(self.viewer.on_load_event(e));
+                }
+                self.apply(fx, el);
+            }
+            UserEvent::ThumbWake => {
+                // egui 가 없어도 반드시 drain (pending 플래그 리셋)
+                let evs = self.thumbs.drain();
+                let mut any = false;
+                for e in evs {
+                    match e {
+                        ThumbEvent::Ready(t) => {
+                            if self.viewer.library.position(EntryId(t.key)).is_some() {
+                                self.browser.textures.push(t.key, t.image, t.full_size);
+                                any = true;
+                            }
+                        }
+                        ThumbEvent::Failed { key, .. } => {
+                            any |= self.thumb_failed.insert(key);
+                        }
+                    }
+                }
+                if any && self.viewer.mode == Mode::Browse {
+                    if let Some(g) = &self.gfx {
+                        g.window.request_redraw();
+                    }
+                }
+            }
+        }
+    }
+
+    fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // 버튼 놓기·커서 이탈은 egui 가 소비해도 드래그를 끝낸다 (드래그가 붙어 버리는 것 방지)
+        if matches!(event, WindowEvent::MouseInput { state: ElementState::Released, .. } | WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false)) {
+            self.dragging = None;
+        }
+        let browse = self.viewer.mode == Mode::Browse;
+        // egui 가 먼저 본다 (버튼 위 클릭 등은 egui 몫)
+        if let Some(g) = &mut self.gfx {
+            // RedrawRequested 를 egui 에 넘기면 repaint=true 를 돌려줘 무한 다시 그리기가 된다 (대기 중 CPU 12%)
+            if let (Some((ctx, state)), false) = (&mut g.egui, matches!(event, WindowEvent::RedrawRequested)) {
+                let r = state.on_window_event(&g.window, &event);
+                if r.repaint {
+                    g.window.request_redraw();
+                }
+                // 키는 글 입력 중일 때만 egui 몫 (위젯 포커스가 단축키를 삼키지 않게)
+                let is_key = matches!(event, WindowEvent::KeyboardInput { .. });
+                if r.consumed && (!is_key || ctx.text_edit_focused()) {
+                    return;
+                }
+            }
+        }
+        match event {
+            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::Resized(s) => {
+                if let Some(g) = &mut self.gfx {
+                    g.renderer.resize([s.width, s.height]);
+                }
+                let side = self.monitor_side();
+                let fx = self.viewer.set_display_side(side).merge(self.viewer.set_screen([s.width as f32, s.height as f32]));
+                self.apply(fx, el);
+            }
+            WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                let side = self.monitor_side();
+                let fx = self.viewer.set_display_side(side);
+                self.apply(fx, el);
+            }
+            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
+                if let Some(a) = input::key_action(&event.logical_key, self.mods, fullscreen, self.viewer.mode) {
+                    self.handle(a, el);
+                }
+            }
+            // 브라우저에서는 마우스를 egui(격자 스크롤·클릭)가 맡는다 — 앱의 확대·이동 매핑은 전체 보기에서만
+            WindowEvent::CursorMoved { position, .. } if browse => self.cursor = position,
+            WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. } | WindowEvent::MouseInput { .. } if browse => {}
+            WindowEvent::MouseWheel { delta, .. } => {
+                let anchor = [self.cursor.x as f32, self.cursor.y as f32];
+                let a = match delta {
+                    // 마우스 휠: 커서 기준 확대/축소
+                    MouseScrollDelta::LineDelta(_, y) => Action::ZoomBy { factor: 1.15f32.powf(y), anchor },
+                    // 트랙패드: ⌘/Ctrl 이면 확대, 아니면 이동
+                    MouseScrollDelta::PixelDelta(p) => {
+                        if self.mods.super_key() || self.mods.control_key() {
+                            Action::ZoomBy { factor: (1.0 + p.y as f32 * 0.005).clamp(0.5, 2.0), anchor }
+                        } else {
+                            Action::Pan([p.x as f32, p.y as f32])
+                        }
+                    }
+                };
+                self.handle(a, el);
+            }
+            WindowEvent::PinchGesture { delta, .. } => {
+                let anchor = [self.cursor.x as f32, self.cursor.y as f32];
+                self.handle(Action::ZoomBy { factor: (1.0 + delta as f32).clamp(0.5, 2.0), anchor }, el);
+            }
+            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
+                ElementState::Pressed => {
+                    let now = Instant::now();
+                    let double = self.last_click.is_some_and(|t| now.duration_since(t) < Duration::from_millis(350));
+                    self.last_click = Some(now);
+                    if double {
+                        self.last_click = None;
+                        let anchor = [self.cursor.x as f32, self.cursor.y as f32];
+                        self.handle(Action::ToggleFitActual { anchor }, el);
+                    } else {
+                        self.dragging = Some(self.cursor);
+                    }
+                }
+                ElementState::Released => self.dragging = None,
+            },
+            WindowEvent::CursorMoved { position, .. } => {
+                if let Some(prev) = self.dragging {
+                    let d = [(position.x - prev.x) as f32, (position.y - prev.y) as f32];
+                    self.dragging = Some(position);
+                    self.handle(Action::Pan(d), el);
+                }
+                self.cursor = position;
+            }
+            WindowEvent::DroppedFile(p) => self.handle(Action::Open(p), el),
+            WindowEvent::RedrawRequested => self.frame(el, None),
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        // 1) egui 가 요청한 다시 그리기 시각이 지났으면 그리고 비운다 (지난 시각으로 WaitUntil 하면 바쁜 대기)
+        if let Some(at) = self.repaint_at {
+            if Instant::now() >= at {
+                self.repaint_at = None;
+                if let Some(g) = &self.gfx {
+                    g.window.request_redraw();
+                }
+            }
+        }
+        // 2) 자가 시험 진행
+        let test_at = if self.selftest.is_some() && self.gfx.is_some() { self.run_selftest(el) } else { None };
+        // 3) 미래 시각 중 가장 이른 것까지 대기, 없으면 이벤트가 올 때까지
+        let now = Instant::now();
+        let next = [self.repaint_at, test_at].into_iter().flatten().filter(|t| *t > now).min();
+        el.set_control_flow(match next {
+            Some(t) => ControlFlow::WaitUntil(t),
+            None => ControlFlow::Wait,
+        });
+    }
+}

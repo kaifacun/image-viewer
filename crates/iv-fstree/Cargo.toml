@@ -1,0 +1,8 @@
+[package]
+name = "iv-fstree"
+description = "폴더 트리 모델 — 루트 목록, 하위 폴더 지연 나열·캐시 (UI·이미지 무관)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

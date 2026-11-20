@@ -1,0 +1,19 @@
+[package]
+name = "iv-decode-imageio"
+description = "macOS ImageIO 디코더 — HEIC/AVIF/RAW/JPEG 등, OS 축소 디코딩·내장 미리보기 사용"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+log.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-core-foundation = { version = "0.3", features = ["CFDictionary", "CFNumber", "CFString", "CFURL", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", features = ["CGImage", "CGContext", "CGColorSpace", "CGBitmapContext"] }
+objc2-image-io = { version = "0.3", features = ["CGImageSource", "CGImageProperties", "objc2-core-graphics"] }
+
+[dev-dependencies]
+iv-decode-image.workspace = true

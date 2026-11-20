@@ -1,0 +1,13 @@
+[package]
+name = "iv-ui"
+description = "egui 오버레이 (상태 표시줄·정보 창·조작 버튼)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+iv-viewer.workspace = true
+iv-core.workspace = true
+iv-library.workspace = true
+iv-fstree.workspace = true

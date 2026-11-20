@@ -1,0 +1,10 @@
+[package]
+name = "iv-imageops"
+description = "프레임 픽셀 연산 (SIMD 축소 리샘플)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+fast_image_resize = "6"

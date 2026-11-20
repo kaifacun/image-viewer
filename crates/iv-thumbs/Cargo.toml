@@ -1,0 +1,16 @@
+[package]
+name = "iv-thumbs"
+description = "썸네일 서비스 — 보이는 목록 우선 생성 + 메모리 LRU + 디스크 캐시"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+iv-imageops.workspace = true
+parking_lot.workspace = true
+log.workspace = true
+image = { workspace = true, features = ["jpeg", "png"] }
+
+[dev-dependencies]
+iv-decode-image.workspace = true

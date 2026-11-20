@@ -1,0 +1,18 @@
+[package]
+name = "iv-render-wgpu"
+description = "wgpu GPU 렌더러 (Metal/DX12/Vulkan, 폴백 어댑터 WARP/llvmpipe)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+iv-render.workspace = true
+iv-viewport.workspace = true
+iv-imageops.workspace = true
+wgpu.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
+log.workspace = true

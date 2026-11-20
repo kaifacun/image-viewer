@@ -1,0 +1,423 @@
+//! 브라우저 화면 (FastStone 형): 메뉴·도구모음·경로 줄 / 폴더 트리 + 미리보기 칸 / 썸네일 격자 / 상태줄.
+//!
+//! 그리기만 하고 상태를 바꾸지 않는다 — 사용자의 동작은 [`BrowserOut`] 으로 돌려준다.
+//! 미리보기 칸은 **투명**으로 비워 두고 그 사각형을 돌려준다: 앱이 렌더러의 이미지 경로(밉맵)로 그 칸에 그린다.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Vec2};
+use iv_core::Frame;
+use iv_fstree::Row;
+use iv_library::Entry;
+use iv_viewer::{Action, SortKey};
+
+/// 썸네일 GPU 텍스처 묶음 (바이트 목표치 — 보이는 것 + 여유를 밑돌지 않음, 보이는 범위 밖부터 해제).
+/// 삽입은 egui 패스 안에서만 한다 ([`ThumbTextures::flush`]) — 텍스처 delta 가 그 패스 출력에 실리도록.
+pub struct ThumbTextures {
+    map: HashMap<u64, TextureHandle>,
+    bytes: usize,
+    budget: usize,
+    pending: VecDeque<(u64, Arc<Frame>)>,
+    /// 원본 크기 (텍스처를 해제해도 남겨 둔다 — 작음)
+    sizes: HashMap<u64, [u32; 2]>,
+}
+
+impl Default for ThumbTextures {
+    fn default() -> Self {
+        Self { map: HashMap::new(), bytes: 0, budget: 96 << 20, pending: VecDeque::new(), sizes: HashMap::new() }
+    }
+}
+
+impl ThumbTextures {
+    /// 다음 패스에서 텍스처로 올릴 썸네일 (방향 적용된 꽉 찬 RGBA)
+    pub fn push(&mut self, key: u64, image: Arc<Frame>, full_size: [u32; 2]) {
+        self.sizes.insert(key, full_size);
+        if !self.map.contains_key(&key) {
+            self.pending.push_back((key, image));
+        }
+    }
+
+    pub fn has(&self, key: u64) -> bool {
+        self.map.contains_key(&key) || self.pending.iter().any(|(k, _)| *k == key)
+    }
+
+    pub fn full_size(&self, key: u64) -> Option<[u32; 2]> {
+        self.sizes.get(&key).copied()
+    }
+
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// 폴더가 바뀜·렌더러 교체 — 모두 해제 (핸들 drop → 다음 패스의 textures_delta.free)
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.pending.clear();
+        self.sizes.clear();
+        self.bytes = 0;
+    }
+
+    /// 대기 중인 것을 최대 `max` 장 올리고, 바이트 상한을 넘으면 `keep` 밖부터 해제
+    fn flush(&mut self, ctx: &egui::Context, max: usize, keep: &HashSet<u64>) {
+        for _ in 0..max {
+            let Some((key, f)) = self.pending.pop_front() else { break };
+            if self.map.contains_key(&key) {
+                continue;
+            }
+            let img = egui::ColorImage::from_rgba_unmultiplied([f.width as usize, f.height as usize], &f.pixels[..f.width as usize * f.height as usize * 4]);
+            let h = ctx.load_texture(format!("thumb-{key}"), img, TextureOptions::LINEAR);
+            self.bytes += f.width as usize * f.height as usize * 4;
+            self.map.insert(key, h);
+        }
+        // 보이는 것은 해제하지 않는다 — 상한은 "보이는 것 + 여유"를 밑돌지 않게 (큰 모니터·작은 타일에서 반복 해제·재업로드 방지)
+        let keep_bytes: usize = self.map.iter().filter(|(k, _)| keep.contains(k)).map(|(_, h)| h.size()[0] * h.size()[1] * 4).sum();
+        let budget = self.budget.max(keep_bytes + (32 << 20));
+        if self.bytes > budget {
+            let drop: Vec<u64> = self.map.keys().filter(|k| !keep.contains(k)).copied().collect();
+            for k in drop {
+                if self.bytes <= budget * 3 / 4 {
+                    break;
+                }
+                if let Some(h) = self.map.remove(&k) {
+                    let [w, hh] = h.size();
+                    self.bytes -= w * hh * 4;
+                }
+            }
+        }
+    }
+
+    fn get(&self, key: u64) -> Option<&TextureHandle> {
+        self.map.get(&key)
+    }
+}
+
+/// 프레임 사이에 유지되는 UI 상태 (앱이 소유)
+pub struct BrowserState {
+    pub textures: ThumbTextures,
+    /// 다음 프레임에 이 항목이 보이도록 스크롤 (한 번만)
+    pub scroll_to: Option<usize>,
+    /// 썸네일 칸 크기 (점)
+    pub tile: f32,
+    /// 경로 줄 편집 중인 글
+    path_edit: String,
+    path_edit_for: Option<PathBuf>,
+    /// 직전 격자 보이는 영역 (내용 좌표: y 오프셋, 높이)
+    last_view: Option<(f32, f32)>,
+    /// 직전 프레임 썸네일 요청 범위 (텍스처 해제에서 제외)
+    last_visible: Range<usize>,
+}
+
+impl Default for BrowserState {
+    fn default() -> Self {
+        Self { textures: ThumbTextures::default(), scroll_to: None, tile: 128.0, path_edit: String::new(), path_edit_for: None, last_view: None, last_visible: 0..0 }
+    }
+}
+
+impl BrowserState {
+    /// egui 컨텍스트가 새로 만들어졌을 때(렌더러 교체) — 스크롤 위치가 사라졌으니 선택 항목으로 다시 스크롤
+    pub fn reset_context(&mut self, selected: Option<usize>) {
+        self.textures.clear();
+        self.last_view = None;
+        self.scroll_to = selected;
+    }
+}
+
+pub const TILE_MIN: f32 = 80.0;
+pub const TILE_MAX: f32 = 200.0;
+
+/// 브라우저가 그릴 내용
+pub struct BrowserModel<'a> {
+    pub entries: &'a [Entry],
+    pub selected: Option<usize>,
+    pub dir: Option<&'a Path>,
+    pub tree: &'a [Row],
+    pub status: &'a str,
+    pub sort: (SortKey, bool),
+    pub failed: &'a HashSet<u64>,
+    /// 미리보기 칸에 렌더러가 실제 프레임을 그리는가 (아니면 썸네일로 대신 채움)
+    pub preview_has_frame: bool,
+}
+
+#[derive(Default)]
+pub struct BrowserOut {
+    pub actions: Vec<Action>,
+    /// 펼침/접기 전환할 트리 노드
+    pub tree_toggle: Option<PathBuf>,
+    /// 썸네일을 요청할 항목 범위 (보이는 줄 ±2줄)
+    pub visible: Range<usize>,
+    /// 미리보기 칸 (점 단위, 화면 좌표)
+    pub preview_rect: Option<Rect>,
+    pub grid_cols: usize,
+    pub grid_rows_visible: usize,
+}
+
+const GAP: f32 = 8.0;
+const LABEL_H: f32 = 34.0;
+
+pub fn draw(ctx: &egui::Context, st: &mut BrowserState, m: &BrowserModel<'_>) -> BrowserOut {
+    let mut out = BrowserOut { grid_cols: 1, grid_rows_visible: 1, ..Default::default() };
+    // 직전 프레임에 보이던 썸네일은 해제하지 않는다
+    let keep: HashSet<u64> = m.entries.get(st.last_visible.clone()).unwrap_or(&[]).iter().map(|e| e.id.0).collect();
+    st.textures.flush(ctx, 48, &keep);
+
+    ctx.root_ui(|ui| {
+        egui::Panel::top("iv-menu").show(ui, |ui| menu_bar(ui, st, m, &mut out));
+        egui::Panel::top("iv-toolbar").show(ui, |ui| toolbar(ui, st, m, &mut out));
+        egui::Panel::bottom("iv-status").show(ui, |ui| {
+            ui.label(RichText::new(m.status).size(12.5).color(Color32::from_gray(210)));
+        });
+        egui::Panel::left("iv-side").frame(egui::Frame::NONE).resizable(true).default_size(260.0).size_range(160.0..=600.0).show(ui, |ui| {
+            // 미리보기 칸 — 투명 (렌더러가 아래에 이미지를 그린다)
+            egui::Panel::bottom("iv-preview").frame(egui::Frame::NONE).resizable(true).default_size(240.0).size_range(80.0..=(ui.available_height() * 0.6).max(80.0)).show(ui, |ui| {
+                let rect = ui.max_rect();
+                out.preview_rect = Some(rect);
+                let painter = ui.painter_at(rect);
+                painter.rect_stroke(rect.shrink(0.5), CornerRadius::ZERO, Stroke::new(1.0, Color32::from_gray(60)), StrokeKind::Inside);
+                // 프레임이 아직 없으면 썸네일로 채워 깜박임을 없앤다
+                if !m.preview_has_frame {
+                    if let Some(tex) = m.selected.and_then(|i| m.entries.get(i)).and_then(|e| st.textures.get(e.id.0)) {
+                        let r = fit_rect(rect.shrink(4.0), tex.size_vec2(), false);
+                        painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                    }
+                }
+                ui.allocate_rect(rect, Sense::hover());
+            });
+            egui::CentralPanel::default().show(ui, |ui| folder_tree(ui, m, &mut out));
+        });
+        egui::CentralPanel::default().show(ui, |ui| grid(ui, st, m, &mut out));
+    });
+
+    st.last_visible = out.visible.clone();
+    // 위젯 포커스가 단축키(화살표·Enter)를 삼키지 않게: 글 입력 중이 아니면 포커스를 놓는다
+    if !ctx.text_edit_focused() {
+        ctx.memory_mut(|mem| {
+            if let Some(id) = mem.focused() {
+                mem.surrender_focus(id);
+            }
+        });
+    }
+    out
+}
+
+fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+    egui::MenuBar::new().ui(ui, |ui| {
+        ui.menu_button("파일", |ui| {
+            if ui.button("상위 폴더  ⌫").clicked() {
+                out.actions.push(Action::ParentFolder);
+            }
+            if ui.button("새로고침  ⌘R").clicked() {
+                out.actions.push(Action::Refresh);
+            }
+            ui.separator();
+            if ui.button("끝내기  ⌘Q").clicked() {
+                out.actions.push(Action::Quit);
+            }
+        });
+        ui.menu_button("보기", |ui| {
+            if ui.add_enabled(m.selected.is_some(), egui::Button::new("전체 보기  ⏎")).clicked() {
+                out.actions.push(Action::EnterView);
+            }
+            ui.separator();
+            for (label, t) in [("썸네일 작게", 96.0), ("썸네일 보통", 128.0), ("썸네일 크게", 176.0)] {
+                if ui.selectable_label((st.tile - t).abs() < 1.0, label).clicked() {
+                    st.tile = t;
+                }
+            }
+        });
+        ui.menu_button("정렬", |ui| sort_items(ui, m, out));
+    });
+}
+
+const SORTS: [(SortKey, &str); 4] = [(SortKey::Name, "이름"), (SortKey::Modified, "수정한 날짜"), (SortKey::Size, "크기"), (SortKey::Type, "형식")];
+
+fn sort_items(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+    let (cur, asc) = m.sort;
+    for (k, label) in SORTS {
+        if ui.selectable_label(cur == k, label).clicked() {
+            out.actions.push(Action::Sort(k, asc));
+        }
+    }
+    ui.separator();
+    if ui.selectable_label(asc, "오름차순").clicked() {
+        out.actions.push(Action::Sort(cur, true));
+    }
+    if ui.selectable_label(!asc, "내림차순").clicked() {
+        out.actions.push(Action::Sort(cur, false));
+    }
+}
+
+fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+    ui.horizontal(|ui| {
+        if ui.button("⬆ 상위").on_hover_text("상위 폴더 (⌫)").clicked() {
+            out.actions.push(Action::ParentFolder);
+        }
+        if ui.button("새로고침").on_hover_text("새로고침 (⌘R)").clicked() {
+            out.actions.push(Action::Refresh);
+        }
+        if ui.add_enabled(m.selected.is_some(), egui::Button::new("전체 보기")).on_hover_text("선택한 사진 크게 보기 (Enter·더블클릭)").clicked() {
+            out.actions.push(Action::EnterView);
+        }
+        ui.separator();
+        ui.label("크기");
+        ui.add(egui::Slider::new(&mut st.tile, TILE_MIN..=TILE_MAX).show_value(false));
+        ui.separator();
+        let (cur, asc) = m.sort;
+        let name = SORTS.iter().find(|(k, _)| *k == cur).map(|(_, n)| *n).unwrap_or("");
+        egui::ComboBox::from_id_salt("iv-sort").selected_text(format!("정렬: {name} {}", if asc { "↑" } else { "↓" })).show_ui(ui, |ui| sort_items(ui, m, out));
+        ui.separator();
+        // 경로 줄 — 고쳐 쓰고 Enter 로 이동
+        let dir_s = m.dir.map(|d| d.display().to_string()).unwrap_or_default();
+        if st.path_edit_for.as_deref() != m.dir {
+            st.path_edit = dir_s.clone();
+            st.path_edit_for = m.dir.map(Path::to_path_buf);
+        }
+        let r = ui.add(egui::TextEdit::singleline(&mut st.path_edit).desired_width(f32::INFINITY).hint_text("폴더 경로"));
+        if r.lost_focus() {
+            let p = PathBuf::from(st.path_edit.trim());
+            // Enter 로 확정했고 폴더가 있으면 이동, 아니면(다른 곳 클릭·Esc·없는 경로) 현재 경로로 되돌린다
+            if ui.input(|i| i.key_pressed(egui::Key::Enter)) && p.is_dir() {
+                out.actions.push(Action::OpenFolder(p));
+            } else {
+                st.path_edit = dir_s;
+            }
+        }
+    });
+}
+
+fn folder_tree(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+    egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        for row in m.tree {
+            ui.horizontal(|ui| {
+                ui.add_space(row.depth as f32 * 14.0);
+                if row.has_children {
+                    let arrow = if row.expanded { "▼" } else { "▶" };
+                    if ui.add(egui::Button::new(RichText::new(arrow).size(10.0)).frame(false).min_size(Vec2::new(14.0, 14.0))).clicked() {
+                        out.tree_toggle = Some(row.path.clone());
+                    }
+                } else {
+                    ui.add_space(18.0);
+                }
+                let current = m.dir == Some(row.path.as_path());
+                let r = ui.selectable_label(current, row.name.as_str());
+                if r.clicked() && !current {
+                    out.actions.push(Action::OpenFolder(row.path.clone()));
+                }
+                if r.double_clicked() && row.has_children {
+                    out.tree_toggle = Some(row.path.clone());
+                }
+            });
+        }
+    });
+}
+
+fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+    let n = m.entries.len();
+    if n == 0 {
+        ui.centered_and_justified(|ui| {
+            ui.label(RichText::new(if m.dir.is_some() { "이 폴더에는 사진이 없습니다" } else { "왼쪽에서 폴더를 고르세요" }).color(Color32::from_gray(150)));
+        });
+        return;
+    }
+    let tile = st.tile.clamp(TILE_MIN, TILE_MAX);
+    let avail_w = ui.available_width() - 14.0; // 스크롤바 자리
+    let pitch_x = tile + GAP;
+    let pitch_y = tile + LABEL_H + GAP;
+    let cols = (((avail_w + GAP) / pitch_x).floor() as usize).max(1);
+    let rows = n.div_ceil(cols);
+    out.grid_cols = cols;
+    // 열이 남는 공간은 양옆 여백으로 고르게
+    let used = cols as f32 * pitch_x - GAP;
+    let left_pad = ((avail_w - used) / 2.0).max(0.0);
+
+    let mut sa = egui::ScrollArea::vertical().auto_shrink(false).id_salt("iv-grid");
+    if let Some(i) = st.scroll_to.take() {
+        let row_top = (i / cols) as f32 * pitch_y;
+        let (off, h) = st.last_view.unwrap_or((0.0, ui.available_height()));
+        // 화면 밖일 때만 최소 이동
+        let target = if row_top < off {
+            Some(row_top)
+        } else if row_top + pitch_y > off + h {
+            Some(row_top + pitch_y - h)
+        } else {
+            None
+        };
+        if let Some(t) = target {
+            sa = sa.vertical_scroll_offset(t.max(0.0));
+        }
+    }
+    sa.show_viewport(ui, |ui, vp| {
+        ui.set_height(rows as f32 * pitch_y);
+        ui.set_width(ui.available_width());
+        st.last_view = Some((vp.min.y, vp.height()));
+        out.grid_rows_visible = ((vp.height() / pitch_y).floor() as usize).max(1);
+        let first = (vp.min.y / pitch_y).floor().max(0.0) as usize;
+        let last = ((vp.max.y / pitch_y).ceil() as usize).min(rows);
+        out.visible = (first.saturating_sub(2) * cols).min(n)..((last + 2) * cols).min(n);
+        let origin = ui.max_rect().min;
+        let painter = ui.painter().clone();
+        for r in first..last {
+            for c in 0..cols {
+                let i = r * cols + c;
+                let Some(e) = m.entries.get(i) else { break };
+                let min = origin + Vec2::new(left_pad + c as f32 * pitch_x, r as f32 * pitch_y);
+                let cell = Rect::from_min_size(min, Vec2::new(tile, tile + LABEL_H));
+                let resp = ui.interact(cell, ui.scope_id().with(("iv-thumb", e.id.0)), Sense::CLICK);
+                if resp.double_clicked() {
+                    out.actions.push(Action::Activate(i));
+                } else if resp.clicked() && m.selected != Some(i) {
+                    out.actions.push(Action::Select(i));
+                }
+                let selected = m.selected == Some(i);
+                draw_tile(&painter, st, m, e, cell, tile, selected, resp.hovered());
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_tile(painter: &egui::Painter, st: &BrowserState, m: &BrowserModel<'_>, e: &Entry, cell: Rect, tile: f32, selected: bool, hovered: bool) {
+    let bg = if selected {
+        Color32::from_rgb(38, 79, 120)
+    } else if hovered {
+        Color32::from_gray(48)
+    } else {
+        Color32::from_gray(34)
+    };
+    painter.rect_filled(cell, CornerRadius::same(4), bg);
+    let img_box = Rect::from_min_size(cell.min, Vec2::splat(tile)).shrink(6.0);
+    if let Some(tex) = st.textures.get(e.id.0) {
+        let r = fit_rect(img_box, tex.size_vec2(), false);
+        painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+    } else if m.failed.contains(&e.id.0) {
+        painter.text(img_box.center(), Align2::CENTER_CENTER, "열 수 없음", FontId::proportional(12.0), Color32::from_rgb(230, 160, 90));
+    } else {
+        painter.rect_filled(img_box.shrink(img_box.width() * 0.2), CornerRadius::same(3), Color32::from_gray(44));
+    }
+    // 파일명 (한 줄, 말줄임) + 해상도
+    let text_w = cell.width() - 8.0;
+    let name_color = if selected { Color32::WHITE } else { Color32::from_gray(220) };
+    let mut job = egui::text::LayoutJob::simple_singleline(e.name.clone(), FontId::proportional(12.0), name_color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(text_w);
+    job.halign = egui::Align::Center;
+    let galley = painter.layout_job(job);
+    painter.galley(Pos2::new(cell.center().x, cell.min.y + tile + 1.0), galley, name_color);
+    if let Some([w, h]) = st.textures.full_size(e.id.0) {
+        painter.text(Pos2::new(cell.center().x, cell.min.y + tile + 17.0), Align2::CENTER_TOP, format!("{w}×{h}"), FontId::proportional(11.0), Color32::from_gray(150));
+    }
+    if selected {
+        painter.rect_stroke(cell, CornerRadius::same(4), Stroke::new(1.5, Color32::from_rgb(90, 150, 220)), StrokeKind::Inside);
+    }
+}
+
+/// 상자 안에 비율 유지로 맞춤 (`upscale` false 면 원래보다 키우지 않음)
+fn fit_rect(bx: Rect, size: Vec2, upscale: bool) -> Rect {
+    let mut s = (bx.width() / size.x).min(bx.height() / size.y);
+    if !upscale {
+        s = s.min(1.0);
+    }
+    Rect::from_center_size(bx.center(), size * s)
+}
