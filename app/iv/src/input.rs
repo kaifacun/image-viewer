@@ -1,11 +1,29 @@
 //! 키 → Action 매핑 (단축키 표). 새 단축키는 여기에만 추가한다.
 
-use iv_viewer::{Action, Mode};
+use iv_viewer::{Action, Mode, VideoCmd};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
-pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode) -> Option<Action> {
+pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode, video: bool) -> Option<Action> {
     let cmd = mods.super_key() || mods.control_key();
     let shift = mods.shift_key();
+    //#region 비디오 전체 보기: Space 재생/정지 · ←/→ 5초(⇧ 1초) · ↑/↓ 소리 · M 소리 끄기 · PageUp/PageDown 이전·다음 영상
+    if video && mode == Mode::View && !cmd {
+        let step = if shift { 1.0 } else { 5.0 };
+        let a = match key {
+            Key::Named(NamedKey::Space) => Some(VideoCmd::Toggle),
+            Key::Named(NamedKey::ArrowRight) => Some(VideoCmd::SeekBy(step)),
+            Key::Named(NamedKey::ArrowLeft) => Some(VideoCmd::SeekBy(-step)),
+            Key::Named(NamedKey::ArrowUp) => Some(VideoCmd::VolumeBy(0.1)),
+            Key::Named(NamedKey::ArrowDown) => Some(VideoCmd::VolumeBy(-0.1)),
+            Key::Character(c) if matches!(c.as_str(), "m" | "M" | "ㅡ") => Some(VideoCmd::ToggleMute),
+            Key::Character(c) if matches!(c.as_str(), "k" | "K" | "ㅏ") => Some(VideoCmd::Toggle),
+            _ => None,
+        };
+        if let Some(a) = a {
+            return Some(Action::Video(a));
+        }
+    }
+    //#endregion
     match key {
         Key::Named(n) => match (mode, n) {
             (_, NamedKey::Escape) if fullscreen => Some(Action::ToggleFullscreen),

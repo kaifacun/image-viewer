@@ -16,7 +16,7 @@ use iv_core::formats::MediaKind;
 use iv_scan::{ScanConfig, Scanner, Verdict};
 use iv_thumbs::{ThumbConfig, ThumbEvent, ThumbRequest, ThumbService};
 use iv_ui::browser::{BrowserModel, BrowserState};
-use iv_viewer::{Action, AppRequest, ClipOp, Effects, FileOp, Mode, ViewerConfig, ViewerState};
+use iv_viewer::{Action, AppRequest, ClipOp, Effects, FileOp, Mode, VideoCmd, ViewerConfig, ViewerState};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -106,6 +106,10 @@ struct App {
     info_rows: Vec<(String, String)>,
     pending_open: Option<PathBuf>,
     selftest: Option<SelfTest>,
+    /// 재생 중인 비디오 (항목 키, 재생기) — 전체 보기·비디오 모드의 현재 항목만
+    video: Option<(u64, iv_video::VideoPlayer)>,
+    /// 일시 정지 중에도 이때까지는 프레임을 꺼낸다 (위치 옮기기 직후 화면이 따라오게)
+    video_poll_until: Option<Instant>,
     /// 자가 시험이 주입할 egui 입력 (프레임마다 한 묶음)
     injected: VecDeque<Vec<egui::Event>>,
     wait_thumbs_until: Option<Instant>,
@@ -174,6 +178,8 @@ impl App {
             info_rows: Vec::new(),
             pending_open,
             selftest: SelfTest::from_env(),
+            video: None,
+            video_poll_until: None,
             injected: VecDeque::new(),
             wait_thumbs_until: None,
             reconfigures: 0,
@@ -222,8 +228,10 @@ impl App {
                 AppRequest::Trash => self.trash(el),
                 AppRequest::FileOp => self.file_op(el),
                 AppRequest::Clipboard(op) => self.clipboard(op, el),
+                AppRequest::Video(cmd) => self.video_cmd(cmd),
             }
         }
+        self.sync_video();
         if fx.redraw || fx.window_changed || fx.library_changed || fx.reveal {
             self.update_title();
             if let Some(g) = &self.gfx {
@@ -231,6 +239,80 @@ impl App {
             }
         }
     }
+
+    //#region 비디오 재생 — 전체 보기·비디오 모드의 현재 항목만 재생기를 가진다
+    /// 화면 상태에 재생기를 맞춘다 (멱등 — 이동·모드 전환·목록 복귀를 한 곳에서). 바뀌면 옛 것은 멈추고 버린다.
+    fn sync_video(&mut self) {
+        let want = (self.viewer.mode == Mode::View && self.viewer.kind() == MediaKind::Video)
+            .then(|| self.viewer.current().and_then(|e| e.path().map(|p| (e.id.0, p.to_path_buf()))))
+            .flatten();
+        if self.video.as_ref().map(|(k, _)| *k) == want.as_ref().map(|(k, _)| *k) {
+            return;
+        }
+        self.video = None;
+        let Some((key, path)) = want else { return };
+        // 창(물리 픽셀) 긴 변까지만 받아 복사 비용을 줄인다 (4K 영상도 창이 작으면 작게)
+        let side = self.gfx.as_ref().map_or(1920, |g| {
+            let s = g.window.inner_size();
+            s.width.max(s.height)
+        });
+        // 자가 시험은 소리를 내지 않는다 (사용자 스피커)
+        let muted = self.selftest.is_some();
+        match iv_video::VideoPlayer::open(&path, side.clamp(640, 3840), muted) {
+            Ok(p) => {
+                p.play();
+                log::info!("재생: {}", path.display());
+                self.video = Some((key, p));
+                self.video_poll_until = Some(Instant::now() + Duration::from_secs(2));
+            }
+            Err(e) => {
+                log::warn!("재생 실패 {}: {e}", path.display());
+                let _ = self.viewer.on_clipboard(Err(format!("재생할 수 없음: {e}")));
+            }
+        }
+        self.request_redraw();
+    }
+
+    fn video_cmd(&mut self, cmd: VideoCmd) {
+        let Some((_, p)) = &self.video else { return };
+        match cmd {
+            VideoCmd::Toggle => p.toggle(),
+            VideoCmd::Seek(t) => p.seek(t),
+            VideoCmd::SeekBy(d) => p.seek(p.position() + d),
+            VideoCmd::Volume(v) => {
+                p.set_volume(v);
+                p.set_muted(v <= 0.0);
+            }
+            VideoCmd::VolumeBy(d) => {
+                p.set_volume(p.volume() + d);
+                p.set_muted(p.volume() <= 0.0);
+            }
+            VideoCmd::ToggleMute => p.set_muted(!p.muted()),
+        }
+        self.video_poll_until = Some(Instant::now() + Duration::from_millis(600));
+        self.request_redraw();
+    }
+
+    /// 새 프레임이 있으면 화면에. 돌려주는 값 = 다음에 확인할 시각 (재생 중이면 곧, 멈췄으면 None)
+    fn pump_video(&mut self) -> Option<Instant> {
+        let (key, p) = self.video.as_mut()?;
+        let key = *key;
+        if let Some(f) = p.poll_frame() {
+            let fx = self.viewer.show_live(key, Arc::new(f));
+            if fx.redraw {
+                self.request_redraw();
+            }
+        }
+        let now = Instant::now();
+        let playing = self.video.as_ref().is_some_and(|(_, p)| p.is_playing());
+        if playing {
+            // 시간 표시도 따라가게 — 새 프레임이 없어도 가끔 다시 그린다
+            Some(now + Duration::from_millis(8))
+        } else {
+            self.video_poll_until.filter(|t| *t > now).map(|_| now + Duration::from_millis(16))
+        }
+    }
+    //#endregion
 
     //#region 휴지통 — 뷰어가 고른 파일을 OS 휴지통으로, 성공한 것만 목록에서 뺀다
     fn trash(&mut self, el: &ActiveEventLoop) {
@@ -685,6 +767,7 @@ impl App {
                 can_browse: self.viewer.browse_available,
                 rotated: self.viewer.turns() != 0,
                 can_rotate: self.viewer.kind() == MediaKind::Image,
+                video: self.video.as_ref().map(|(_, p)| iv_ui::VideoUi { playing: p.is_playing(), position: p.position(), duration: p.duration(), volume: p.volume(), muted: p.muted() }),
             };
             ctx.run_pass(raw, |ctx| ui_actions = iv_ui::draw(ctx, &model))
         };
@@ -915,7 +998,7 @@ impl App {
                     }
                     Some(k) => {
                         let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
-                        if let Some(a) = input::key_action(&k, mods, fullscreen, self.viewer.mode) {
+                        if let Some(a) = input::key_action(&k, mods, fullscreen, self.viewer.mode, self.viewer.kind() == MediaKind::Video) {
                             self.handle(a, el);
                         }
                     }
@@ -1120,7 +1203,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { .. } if self.browser.dialog.is_some() => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
-                if let Some(a) = input::key_action(&event.logical_key, self.mods, fullscreen, self.viewer.mode) {
+                if let Some(a) = input::key_action(&event.logical_key, self.mods, fullscreen, self.viewer.mode, self.viewer.kind() == MediaKind::Video) {
                     // 키를 누르고 있어도 휴지통은 한 번만 (반복 입력이 다음 장을 연달아 지우지 않게)
                     if !(event.repeat && matches!(a, Action::Trash | Action::SaveRotation)) {
                         self.handle(a, el);
@@ -1187,9 +1270,11 @@ impl ApplicationHandler<UserEvent> for App {
         }
         // 2) 자가 시험 진행
         let test_at = if self.selftest.is_some() && self.gfx.is_some() { self.run_selftest(el) } else { None };
-        // 3) 미래 시각 중 가장 이른 것까지 대기, 없으면 이벤트가 올 때까지
+        // 3) 비디오 프레임 (재생 중에만 깨어난다 — 멈추면 대기 CPU 0)
+        let video_at = self.pump_video();
+        // 4) 미래 시각 중 가장 이른 것까지 대기, 없으면 이벤트가 올 때까지
         let now = Instant::now();
-        let next = [self.repaint_at, test_at].into_iter().flatten().filter(|t| *t > now).min();
+        let next = [self.repaint_at, test_at, video_at].into_iter().flatten().filter(|t| *t > now).min();
         el.set_control_flow(match next {
             Some(t) => ControlFlow::WaitUntil(t),
             None => ControlFlow::Wait,

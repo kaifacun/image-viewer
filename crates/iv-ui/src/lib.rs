@@ -7,7 +7,7 @@ pub mod icons;
 pub mod theme;
 
 use egui::{Align2, Color32, CornerRadius, Frame, Margin, RichText, Vec2};
-use iv_viewer::Action;
+use iv_viewer::{Action, VideoCmd};
 
 /// UI 가 그릴 내용 (뷰어 상태에서 앱이 만든다)
 pub struct UiModel<'a> {
@@ -22,6 +22,25 @@ pub struct UiModel<'a> {
     pub rotated: bool,
     /// 돌릴 수 있는가 (사진 모드만 — 비디오는 회전 버튼을 숨긴다)
     pub can_rotate: bool,
+    /// 비디오 재생 중이면 조작 막대 내용
+    pub video: Option<VideoUi>,
+}
+
+/// 비디오 조작 막대에 보일 상태
+#[derive(Clone, Copy, Debug)]
+pub struct VideoUi {
+    pub playing: bool,
+    pub position: f64,
+    pub duration: f64,
+    pub volume: f32,
+    pub muted: bool,
+}
+
+/// 초 → "1:05" / "1:02:03"
+pub fn format_clock(t: f64) -> String {
+    let t = t.max(0.0) as u64;
+    let (h, m, s) = (t / 3600, t / 60 % 60, t % 60);
+    if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
 }
 
 fn panel_frame() -> Frame {
@@ -95,13 +114,45 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
                     if m.can_browse {
                         sep(ui);
                     }
-                    if icon_button(ui, Icon::ChevronLeft, "이전 (←)", m.has_image, false).clicked() {
+                    let (prev_tip, next_tip) = if m.video.is_some() { ("이전 영상 (PageUp)", "다음 영상 (PageDown)") } else { ("이전 (←)", "다음 (→)") };
+                    if icon_button(ui, Icon::ChevronLeft, prev_tip, m.has_image, false).clicked() {
                         actions.push(Action::Prev);
                     }
-                    if icon_button(ui, Icon::ChevronRight, "다음 (→)", m.has_image, false).clicked() {
+                    //#region 비디오 — 재생/정지 · 시간 · 위치 막대 · 소리
+                    if let Some(v) = m.video {
+                        let (icon, tip) = if v.playing { (Icon::Pause, "일시 정지 (Space)") } else { (Icon::Play, "재생 (Space)") };
+                        if icon_toggle(ui, icon, tip, true, false, false).clicked() {
+                            actions.push(Action::Video(VideoCmd::Toggle));
+                        }
+                    }
+                    //#endregion
+                    if icon_button(ui, Icon::ChevronRight, next_tip, m.has_image, false).clicked() {
                         actions.push(Action::Next);
                     }
                     sep(ui);
+                    if let Some(v) = m.video {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(format_clock(v.position)).size(theme::FONT_SMALL).color(theme::TEXT).monospace());
+                        let mut pos = v.position;
+                        let dur = v.duration.max(0.01);
+                        ui.spacing_mut().slider_width = 280.0;
+                        let r = ui.add(egui::Slider::new(&mut pos, 0.0..=dur).show_value(false)).on_hover_text("위치 (←/→ 5초, ⇧ 1초)");
+                        if r.changed() {
+                            actions.push(Action::Video(VideoCmd::Seek(pos)));
+                        }
+                        ui.label(RichText::new(format_clock(v.duration)).size(theme::FONT_SMALL).color(theme::TEXT_DIM).monospace());
+                        sep(ui);
+                        let (icon, tip) = if v.muted || v.volume <= 0.0 { (Icon::Mute, "소리 켜기 (M)") } else { (Icon::Volume, "소리 끄기 (M)") };
+                        if icon_button(ui, icon, tip, true, false).clicked() {
+                            actions.push(Action::Video(VideoCmd::ToggleMute));
+                        }
+                        let mut vol = if v.muted { 0.0 } else { v.volume };
+                        ui.spacing_mut().slider_width = 80.0;
+                        if ui.add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false)).on_hover_text("소리 크기 (↑/↓)").changed() {
+                            actions.push(Action::Video(VideoCmd::Volume(vol)));
+                        }
+                        sep(ui);
+                    }
                     if icon_button(ui, Icon::Expand, "화면에 맞춤 (0)", m.has_image, false).clicked() {
                         actions.push(Action::Fit);
                     }

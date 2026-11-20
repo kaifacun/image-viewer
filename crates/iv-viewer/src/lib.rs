@@ -102,6 +102,24 @@ pub enum Action {
     SetFilter(Option<Vec<&'static str>>),
     /// 화면 종류 바꾸기 (사진 ↔ 비디오) — 필터는 풀고 목록을 그 종류로 다시 나열
     SetKind(MediaKind),
+    /// 비디오 재생 조작 (전체 보기에서) — 실제 재생기는 앱이 가진다
+    Video(VideoCmd),
+}
+
+/// 비디오 재생 명령
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VideoCmd {
+    /// 재생 ↔ 일시 정지 (Space)
+    Toggle,
+    /// 이 위치로 (초)
+    Seek(f64),
+    /// 앞뒤로 (초, ←/→)
+    SeekBy(f64),
+    /// 소리 크기 0~1
+    Volume(f32),
+    /// 소리 크기 더하기 (↑/↓)
+    VolumeBy(f32),
+    ToggleMute,
 }
 
 /// 앱이 실행할 파일 작업
@@ -138,7 +156,7 @@ pub enum Mode {
 }
 
 /// 앱(창)이 해야 할 일
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AppRequest {
     ToggleFullscreen,
     Quit,
@@ -148,6 +166,8 @@ pub enum AppRequest {
     FileOp,
     /// 클립보드에 쓰기 — 끝나면 [`ViewerState::notice`] 로 알린다
     Clipboard(ClipOp),
+    /// 비디오 재생기에 명령
+    Video(VideoCmd),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -248,6 +268,8 @@ pub struct ViewerState {
     turns: u8,
     /// 화면 프레임의 원래(파일) 방향 — 회전을 다시 입힐 때 바탕
     shown_base: Orientation,
+    /// 재생 중인 비디오 항목 — 이 항목은 파이프라인 프레임(포스터)이 재생 프레임을 덮지 않게 한다
+    live: Option<u64>,
 }
 
 const ZOOM_STEP: f32 = 1.25;
@@ -278,6 +300,7 @@ impl ViewerState {
             marquee_base: HashSet::new(),
             turns: 0,
             shown_base: Orientation::Normal,
+            live: None,
         }
     }
 
@@ -466,6 +489,7 @@ impl ViewerState {
         self.notice = None;
         self.shown = None;
         self.turns = 0;
+        self.live = None;
         // 평범한 이동 = 현재 항목 하나만 선택
         self.marked.clear();
         self.anchor = self.current_key().map(EntryId);
@@ -492,6 +516,18 @@ impl ViewerState {
             self.preview.set_image(size);
         }
     }
+
+    //#region 비디오 — 재생 프레임 받기
+    /// 재생기가 꺼낸 새 프레임을 화면에 (전체 보기의 현재 항목일 때만). 같은 항목이면 확대·이동은 그대로.
+    pub fn show_live(&mut self, key: u64, frame: Arc<Frame>) -> Effects {
+        if self.mode != Mode::View || self.current_key() != Some(key) {
+            return Effects::default();
+        }
+        self.live = Some(key);
+        self.show(Shown { key, frame, quality: Quality::Decoded, decode_ms: None });
+        Effects::redraw()
+    }
+    //#endregion
 
     //#region 회전 — 화면에만 입히고, 저장은 앱이 (방향 태그만 바꿔)
     /// 저장하지 않은 회전 (시계 방향 90° 단위)
@@ -542,6 +578,7 @@ impl ViewerState {
                 // 저장하지 않은 회전은 버린다 (목록의 썸네일은 파일 그대로)
                 let _ = self.set_turns(0);
                 self.mode = Mode::Browse;
+                self.live = None;
                 Effects::nav().with_reveal()
             }
             Action::Select(i) => self.select_only(i, loader),
@@ -670,6 +707,12 @@ impl ViewerState {
                     }
                     None => Effects::redraw(),
                 }
+            }
+            Action::Video(cmd) => {
+                if self.mode != Mode::View || self.kind != MediaKind::Video {
+                    return Effects::default();
+                }
+                Effects { app: Some(AppRequest::Video(cmd)), ..Default::default() }
             }
             Action::SetFilter(f) => {
                 let f: Option<HashSet<&'static str>> = f.filter(|v| !v.is_empty()).map(|v| v.into_iter().collect());
@@ -1035,6 +1078,8 @@ impl ViewerState {
     pub fn on_load_event(&mut self, ev: LoadEvent) -> Effects {
         let cur = self.current_key();
         match ev {
+            // 재생 중인 비디오는 재생 프레임이 화면 — 포스터로 덮지 않는다
+            LoadEvent::Loaded(l) if Some(l.key) == self.live => Effects::default(),
             LoadEvent::Loaded(l) if Some(l.key) == cur => {
                 let better = match &self.shown {
                     None => true,
@@ -1104,10 +1149,13 @@ impl ViewerState {
             if sh.quality == Quality::Preview {
                 s += "  ·  미리보기";
             }
-            s += &match sh.decode_ms {
-                Some(ms) => format!("  ·  {ms:.0}ms"),
-                None => "  ·  즉시".to_string(),
-            };
+            // 재생 중인 비디오는 디코드 시간이 의미 없다
+            if self.live != Some(sh.key) {
+                s += &match sh.decode_ms {
+                    Some(ms) => format!("  ·  {ms:.0}ms"),
+                    None => "  ·  즉시".to_string(),
+                };
+            }
         } else if self.error.is_none() {
             s += "  ·  불러오는 중…";
         }

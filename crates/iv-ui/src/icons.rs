@@ -36,6 +36,12 @@ pub enum Icon {
     Photo,
     /// 재생 삼각형이 든 네모 (비디오)
     Video,
+    Play,
+    Pause,
+    /// 스피커 + 소리 물결
+    Volume,
+    /// 스피커 + X
+    Mute,
 }
 
 /// 아이콘 버튼. `framed` 면 바탕을 깐다 (도구 막대), 아니면 마우스를 올릴 때만 (떠 있는 막대).
@@ -166,6 +172,30 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
             p.rect_stroke(Rect::from_min_max(at(0.06, 0.16), at(0.94, 0.84)), CornerRadius::same(2), stroke, StrokeKind::Middle);
             p.add(Shape::line(vec![at(0.14, 0.76), at(0.4, 0.46), at(0.58, 0.64), at(0.7, 0.54), at(0.86, 0.72)], stroke));
             p.circle_filled(at(0.7, 0.33), 1.6, color);
+        }
+        Icon::Play => {
+            p.add(Shape::convex_polygon(vec![at(0.24, 0.12), at(0.86, 0.5), at(0.24, 0.88)], color, Stroke::NONE));
+        }
+        Icon::Pause => {
+            p.rect_filled(Rect::from_min_max(at(0.22, 0.14), at(0.42, 0.86)), CornerRadius::same(1), color);
+            p.rect_filled(Rect::from_min_max(at(0.58, 0.14), at(0.78, 0.86)), CornerRadius::same(1), color);
+        }
+        Icon::Volume | Icon::Mute => {
+            p.add(Shape::convex_polygon(vec![at(0.06, 0.36), at(0.24, 0.36), at(0.46, 0.14), at(0.46, 0.86), at(0.24, 0.64), at(0.06, 0.64)], color, Stroke::NONE));
+            if icon == Icon::Mute {
+                line(at(0.62, 0.34), at(0.92, 0.66));
+                line(at(0.92, 0.34), at(0.62, 0.66));
+            } else {
+                let c2 = at(0.46, 0.5);
+                for rad in [0.22f32, 0.38] {
+                    let rr = r.width() * rad;
+                    let pts: Vec<Pos2> = (0..=10).map(|k| {
+                        let a = (-50.0 + 100.0 * k as f32 / 10.0).to_radians();
+                        Pos2::new(c2.x + rr * a.cos(), c2.y + rr * a.sin())
+                    }).collect();
+                    p.add(Shape::line(pts, stroke));
+                }
+            }
         }
         Icon::Video => {
             p.rect_stroke(Rect::from_min_max(at(0.06, 0.16), at(0.94, 0.84)), CornerRadius::same(2), stroke, StrokeKind::Middle);

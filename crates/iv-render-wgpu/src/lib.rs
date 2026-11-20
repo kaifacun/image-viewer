@@ -34,6 +34,10 @@ struct GpuImage {
     bind_linear: wgpu::BindGroup,
     bind_nearest: wgpu::BindGroup,
     orientation: iv_core::Orientation,
+    /// 같은 항목·같은 크기의 새 프레임(비디오)은 이 텍스처에 덮어쓴다 — 매 프레임 새로 만들지 않게
+    texture: wgpu::Texture,
+    size: [u32; 2],
+    levels: u32,
 }
 
 struct Gpu {
@@ -294,6 +298,21 @@ impl Gpu {
         };
         let (w, h) = (frame.width, frame.height);
         let levels = 32 - w.max(h).leading_zeros();
+        //#region 비디오: 같은 항목·같은 크기면 기존 텍스처에 픽셀만 덮어쓰고 밉맵만 다시
+        if let Some(img) = self.image.as_mut().filter(|i| i.key == key && i.size == [w, h]) {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &img.texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &frame.pixels,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(frame.stride as u32), rows_per_image: Some(h) },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            img.frame_ptr = ptr;
+            img.orientation = frame.orientation;
+            let (tex, lv) = (img.texture.clone(), img.levels);
+            self.generate_mips(&tex, lv);
+            return;
+        }
+        //#endregion
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("image"),
             size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -329,6 +348,9 @@ impl Gpu {
             bind_linear: bind(&self.linear),
             bind_nearest: bind(&self.nearest),
             orientation: frame.orientation,
+            texture: texture.clone(),
+            size: [w, h],
+            levels,
         });
         log::debug!("업로드 {w}x{h} ({levels} 단계) {:.1}ms", t.elapsed().as_secs_f64() * 1000.0);
     }
