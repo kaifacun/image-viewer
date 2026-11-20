@@ -22,6 +22,7 @@ crates/
   iv-library     폴더 스캔·정렬(이름·날짜·크기·형식)·현재 위치·지원 확장자 필터
   iv-fstree      폴더 트리 모델 (루트·지연 나열·펼침 상태, 숨김 조건은 술어로 받음) — std 만
   iv-scan        백그라운드 사진 폴더 스캔 (낮은 QoS 스레드, Gate 양보) → 폴더별 Verdict(HasPhotos|Empty|Unknown)
+  iv-fsops       새 폴더·이름 바꾸기·폴더로 옮기기 (덮어쓰지 않음) — std 만
   iv-trash       OS 휴지통 이동 (macOS NSFileManager) — 영구 삭제로 대체하지 않음
   iv-viewport    확대·이동·화면 맞춤 수학 (순수 함수, 단위 시험)
   iv-render      Renderer trait (백엔드 무관)

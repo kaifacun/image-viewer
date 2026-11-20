@@ -14,6 +14,8 @@ use iv_fstree::Row;
 use iv_library::{Entry, EntryId};
 use iv_viewer::{Action, SortKey};
 
+use crate::dialog::{self, Dialog, DialogResult};
+
 /// 썸네일 GPU 텍스처 묶음 (바이트 목표치 — 보이는 것 + 여유를 밑돌지 않음, 보이는 범위 밖부터 해제).
 /// 삽입은 egui 패스 안에서만 한다 ([`ThumbTextures::flush`]) — 텍스처 delta 가 그 패스 출력에 실리도록.
 pub struct ThumbTextures {
@@ -108,16 +110,28 @@ pub struct BrowserState {
     last_view: Option<(f32, f32)>,
     /// 직전 프레임 썸네일 요청 범위 (텍스처 해제에서 제외)
     last_visible: Range<usize>,
+    /// 열려 있는 이름 입력 대화 상자
+    pub dialog: Option<Dialog>,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { textures: ThumbTextures::default(), scroll_to: None, tile: 128.0, path_edit: String::new(), path_edit_for: None, last_view: None, last_visible: 0..0 }
+        Self { textures: ThumbTextures::default(), scroll_to: None, tile: 128.0, path_edit: String::new(), path_edit_for: None, last_view: None, last_visible: 0..0, dialog: None }
     }
 }
 
 impl BrowserState {
     /// egui 컨텍스트가 새로 만들어졌을 때(렌더러 교체) — 스크롤 위치가 사라졌으니 선택 항목으로 다시 스크롤
+    /// 새 폴더 대화 상자 (현재 폴더 안)
+    pub fn begin_new_folder(&mut self, parent: &Path) {
+        self.dialog = Some(Dialog::new_folder(parent.to_path_buf()));
+    }
+
+    /// 사진 이름 바꾸기 대화 상자
+    pub fn begin_rename_file(&mut self, path: &Path) {
+        self.dialog = Some(Dialog::rename_file(path.to_path_buf()));
+    }
+
     pub fn reset_context(&mut self, selected: Option<usize>) {
         self.textures.clear();
         self.last_view = None;
@@ -197,11 +211,23 @@ pub fn draw(ctx: &egui::Context, st: &mut BrowserState, m: &BrowserModel<'_>) ->
                 }
                 ui.allocate_rect(rect, Sense::hover());
             });
-            egui::CentralPanel::default().show(ui, |ui| folder_tree(ui, m, &mut out));
+            egui::CentralPanel::default().show(ui, |ui| folder_tree(ui, st, m, &mut out));
         });
         egui::CentralPanel::default().show(ui, |ui| grid(ui, st, m, &mut out));
     });
 
+    //#region 이름 입력 대화 상자
+    if let Some(d) = &mut st.dialog {
+        match dialog::draw(ctx, d) {
+            DialogResult::Open => {}
+            DialogResult::Cancel => st.dialog = None,
+            DialogResult::Done(a) => {
+                out.actions.push(a);
+                st.dialog = None;
+            }
+        }
+    }
+    //#endregion
     st.last_visible = out.visible.clone();
     // 위젯 포커스가 단축키(화살표·Enter)를 삼키지 않게: 글 입력 중이 아니면 포커스를 놓는다
     if !ctx.text_edit_focused() {
@@ -217,6 +243,23 @@ pub fn draw(ctx: &egui::Context, st: &mut BrowserState, m: &BrowserModel<'_>) ->
 fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
     egui::MenuBar::new().ui(ui, |ui| {
         ui.menu_button("파일", |ui| {
+            if ui.add_enabled(m.dir.is_some(), egui::Button::new("새 폴더…  ⇧⌘N")).clicked() {
+                if let Some(d) = m.dir {
+                    st.begin_new_folder(d);
+                }
+            }
+            let cur_path = m.selected.and_then(|i| m.entries.get(i)).and_then(|e| e.path());
+            if ui.add_enabled(cur_path.is_some(), egui::Button::new("사진 이름 바꾸기…  F2")).clicked() {
+                if let Some(p) = cur_path {
+                    st.begin_rename_file(p);
+                }
+            }
+            if ui.add_enabled(m.dir.is_some(), egui::Button::new("폴더 이름 바꾸기…")).clicked() {
+                if let Some(d) = m.dir {
+                    st.dialog = Some(Dialog::rename_folder(d.to_path_buf()));
+                }
+            }
+            ui.separator();
             if ui.button("상위 폴더  ⌫").clicked() {
                 out.actions.push(Action::ParentFolder);
             }
@@ -319,7 +362,7 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
     });
 }
 
-fn folder_tree(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         for (k, row) in m.tree.iter().enumerate() {
@@ -344,6 +387,18 @@ fn folder_tree(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
                 if r.double_clicked() && row.has_children {
                     out.tree_toggle = Some(row.path.clone());
                 }
+                //#region 오른쪽 클릭 — 새 폴더 · 이름 바꾸기 (루트는 이름을 바꾸지 않는다)
+                r.context_menu(|ui| {
+                    if ui.button("새 폴더…").clicked() {
+                        st.dialog = Some(Dialog::new_folder(row.path.clone()));
+                        ui.close();
+                    }
+                    if ui.add_enabled(row.depth > 0, egui::Button::new("이름 바꾸기…")).clicked() {
+                        st.dialog = Some(Dialog::rename_folder(row.path.clone()));
+                        ui.close();
+                    }
+                });
+                //#endregion
                 //#region 폴더 옆 숫자 — 사진 N장 · 하위 폴더 N
                 if let Some(Some((photos, folders))) = m.tree_counts.get(k) {
                     let mut t = Vec::new();
@@ -436,6 +491,33 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
                 }
                 //#endregion
                 let marked = m.marked.contains(&e.id);
+                //#region 오른쪽 클릭 — 이 사진 기준 (선택에 없으면 이 사진만 고른다)
+                resp.context_menu(|ui| {
+                    let marked = m.marked.contains(&e.id);
+                    if ui.button("전체 보기").clicked() {
+                        out.actions.push(Action::Activate(i));
+                        ui.close();
+                    }
+                    if ui.button("이름 바꾸기…  F2").clicked() {
+                        if !marked {
+                            out.actions.push(Action::Select(i));
+                        }
+                        if let Some(p) = e.path() {
+                            st.begin_rename_file(p);
+                        }
+                        ui.close();
+                    }
+                    ui.separator();
+                    let n = if marked { m.marked.len() } else { 1 };
+                    if ui.button(if n > 1 { format!("휴지통으로 이동 ({n}장)") } else { "휴지통으로 이동".to_string() }).clicked() {
+                        if !marked {
+                            out.actions.push(Action::Select(i));
+                        }
+                        out.actions.push(Action::Trash);
+                        ui.close();
+                    }
+                });
+                //#endregion
                 let hovered = resp.contains_pointer() || check_resp.contains_pointer();
                 draw_tile(&painter, st, m, e, cell, tile, marked, m.selected == Some(i), hovered);
                 // 마우스를 올렸거나, 선택됐거나, 여러 장 고르는 중이면 체크 상자를 보인다

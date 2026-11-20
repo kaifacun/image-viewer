@@ -66,6 +66,21 @@ pub enum Action {
     SelectAll,
     /// 선택한 항목(전체 보기에선 보고 있는 장)을 휴지통으로 — 실제 이동은 앱이 한다
     Trash,
+    // ── 파일·폴더 작업 (실제 작업은 앱이 한다 — [`ViewerState::take_file_op`]) ──
+    /// 이름 입력 대화 상자 열기 (F2 · ⇧⌘N) — 앱이 UI 에 연다
+    BeginRename,
+    BeginNewFolder,
+    NewFolder { parent: PathBuf, name: String },
+    RenameFolder { path: PathBuf, name: String },
+    RenameFile { path: PathBuf, name: String },
+}
+
+/// 앱이 실행할 파일 작업
+#[derive(Clone, Debug, PartialEq)]
+pub enum FileOp {
+    NewFolder { parent: PathBuf, name: String },
+    RenameFolder { path: PathBuf, name: String },
+    RenameFile { path: PathBuf, name: String },
 }
 
 /// 화면 모드
@@ -84,6 +99,8 @@ pub enum AppRequest {
     Quit,
     /// [`ViewerState::trash_targets`] 를 휴지통으로 보내고 [`ViewerState::on_trashed`] 로 알려 달라
     Trash,
+    /// [`ViewerState::take_file_op`] 를 실행하고 [`ViewerState::on_file_op`] 로 알려 달라
+    FileOp,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -168,6 +185,8 @@ pub struct ViewerState {
     marked: HashSet<EntryId>,
     /// ⇧ 범위 선택의 기준 항목
     anchor: Option<EntryId>,
+    /// 앱이 실행할 파일 작업 (Effects 는 Copy 라 여기 둔다)
+    file_op: Option<FileOp>,
 }
 
 const ZOOM_STEP: f32 = 1.25;
@@ -190,6 +209,7 @@ impl ViewerState {
             extensions,
             marked: HashSet::new(),
             anchor: None,
+            file_op: None,
         }
     }
 
@@ -458,6 +478,10 @@ impl ViewerState {
                 Effects::redraw()
             }
             Action::ToggleSelect(_) | Action::RangeSelect(_) | Action::GridExtend { .. } | Action::SelectAll => Effects::default(),
+            Action::BeginRename | Action::BeginNewFolder => Effects::default(),
+            Action::NewFolder { parent, name } => self.request(FileOp::NewFolder { parent, name }),
+            Action::RenameFolder { path, name } => self.request(FileOp::RenameFolder { path, name }),
+            Action::RenameFile { path, name } => self.request(FileOp::RenameFile { path, name }),
             Action::Trash => {
                 if self.trash_targets().is_empty() {
                     return Effects::default();
@@ -516,6 +540,83 @@ impl ViewerState {
         let (lo, hi) = (a.min(i), a.max(i));
         self.marked = self.library.entries()[lo..=hi].iter().map(|e| e.id).collect();
         fx
+    }
+    //#endregion
+
+    //#region 파일·폴더 작업 — 상태는 여기서, 실제 디스크 작업은 앱이
+    fn request(&mut self, op: FileOp) -> Effects {
+        self.file_op = Some(op);
+        Effects { app: Some(AppRequest::FileOp), ..Default::default() }
+    }
+
+    pub fn take_file_op(&mut self) -> Option<FileOp> {
+        self.file_op.take()
+    }
+
+    /// 작업 결과 반영. `result` = 새 경로 또는 오류.
+    pub fn on_file_op(&mut self, op: &FileOp, result: &Result<PathBuf, String>, loader: &Loader) -> Effects {
+        let new = match result {
+            Ok(p) => p.clone(),
+            Err(e) => {
+                self.error = Some(e.clone());
+                return Effects::redraw();
+            }
+        };
+        match op {
+            FileOp::NewFolder { parent, .. } => {
+                // 열린 폴더 안이면 하위 폴더 수(상태줄)가 바뀌었다 — 선택은 refresh 가 지킨다
+                if self.library.dir() == Some(parent.as_path()) {
+                    return self.refresh(loader);
+                }
+                let mut fx = Effects::redraw();
+                fx.library_changed = true;
+                fx
+            }
+            FileOp::RenameFile { path, .. } => {
+                let was_current = self.library.current().and_then(|e| e.path()) == Some(path.as_path());
+                let Some((old_id, new_id)) = self.library.rename_entry(path, new) else { return Effects::redraw() };
+                if self.marked.remove(&old_id) {
+                    self.marked.insert(new_id);
+                }
+                if self.anchor == Some(old_id) {
+                    self.anchor = Some(new_id);
+                }
+                let mut fx = if was_current {
+                    // id 가 바뀌었으니 미리보기를 다시 (선택은 지킨다)
+                    let (marked, anchor) = (std::mem::take(&mut self.marked), self.anchor);
+                    let fx = self.after_navigation(loader);
+                    self.marked = marked;
+                    self.anchor = anchor;
+                    fx
+                } else {
+                    Effects::redraw()
+                };
+                fx.library_changed = true;
+                fx.with_reveal()
+            }
+            FileOp::RenameFolder { path, .. } => {
+                // 열린 폴더(또는 그 조상)의 이름이 바뀌었으면 새 경로로 다시 연다
+                let Some(dir) = self.library.dir().map(Path::to_path_buf) else { return Effects::redraw() };
+                match dir.strip_prefix(path) {
+                    Ok(rest) => {
+                        let cur = self.library.current().map(|e| e.name.clone());
+                        let (k, asc) = self.library.sort_order();
+                        let mut fx = self.open(&new.join(rest), loader);
+                        self.library.sort(k, asc);
+                        if let Some(i) = cur.and_then(|n| self.library.entries().iter().position(|e| e.name == n)) {
+                            fx = fx.merge(self.go(i, loader));
+                        }
+                        fx.library_changed = true;
+                        fx.with_reveal()
+                    }
+                    Err(_) => {
+                        let mut fx = Effects::redraw();
+                        fx.library_changed = true;
+                        fx
+                    }
+                }
+            }
+        }
     }
     //#endregion
 

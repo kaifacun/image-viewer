@@ -152,6 +152,15 @@ impl FolderTree {
         }
     }
 
+    /// 폴더 이름이 바뀌었을 때: 펼침 상태를 새 경로로 옮기고 상위 목록을 다시 읽는다
+    pub fn renamed(&mut self, old: &Path, new: &Path) {
+        self.expanded = self.expanded.drain().map(|p| p.strip_prefix(old).map_or(p.clone(), |rest| new.join(rest))).collect();
+        self.children.retain(|k, _| !k.starts_with(old));
+        if let Some(parent) = old.parent() {
+            self.invalidate(parent);
+        }
+    }
+
     /// 한 폴더의 하위 목록만 다시 읽게 한다 (새 폴더가 생겼을 때)
     pub fn invalidate(&mut self, p: &Path) {
         if self.children.remove(p).is_some() && self.expanded.contains(p) {

@@ -1,0 +1,8 @@
+[package]
+name = "iv-fsops"
+description = "파일·폴더 작업 — 새 폴더, 이름 바꾸기, 폴더로 옮기기 (덮어쓰지 않음)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

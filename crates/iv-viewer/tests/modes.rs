@@ -172,3 +172,34 @@ fn on_trashed_removes_only_successes() {
     assert!(v.error.as_deref().unwrap_or("").contains("1개"));
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// 파일 작업 반영: 사진 이름 바꾸기는 선택을 따라가고, 열린 폴더 이름 바꾸기는 새 경로로 다시 연다
+#[test]
+fn file_ops_follow_selection() {
+    use iv_viewer::FileOp;
+    let (d, l, mut v) = setup("fops", 4);
+    let _ = v.open(&d, &l);
+    let _ = v.handle(Action::Select(1), &l);
+    let old = d.canonicalize().unwrap().join("img01.png");
+    let fx = v.handle(Action::RenameFile { path: old.clone(), name: "zz.png".into() }, &l);
+    assert!(fx.app.is_some());
+    let op = v.take_file_op().unwrap();
+    let new = old.with_file_name("zz.png");
+    std::fs::rename(&old, &new).unwrap();
+    let _ = v.on_file_op(&op, &Ok(new.clone()), &l);
+    // 이름순 정렬로 맨 뒤로 갔고, 현재 항목이 따라갔다
+    assert_eq!(v.current().unwrap().name, "zz.png");
+    assert_eq!(v.library.index(), 3);
+    assert_eq!(v.trash_targets(), vec![new]);
+    // 오류는 상태로
+    let _ = v.on_file_op(&FileOp::RenameFile { path: old.clone(), name: "x".into() }, &Err("이미 있음".into()), &l);
+    assert_eq!(v.error.as_deref(), Some("이미 있음"));
+    // 열린 폴더 이름 바꾸기
+    let dir = d.canonicalize().unwrap();
+    let moved = dir.with_file_name(format!("{}-renamed", dir.file_name().unwrap().to_string_lossy()));
+    std::fs::rename(&dir, &moved).unwrap();
+    let _ = v.on_file_op(&FileOp::RenameFolder { path: dir.clone(), name: String::new() }, &Ok(moved.clone()), &l);
+    assert_eq!(v.library.dir(), Some(moved.as_path()));
+    assert_eq!(v.current().unwrap().name, "zz.png");
+    let _ = std::fs::remove_dir_all(&moved);
+}

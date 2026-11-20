@@ -2,6 +2,7 @@
 //! 새 UI 요소(썸네일 줄·메뉴 등)는 이 crate 에 함수로 추가한다.
 
 pub mod browser;
+pub mod dialog;
 
 use egui::{Align2, Color32, CornerRadius, Frame, Margin, RichText, Vec2};
 use iv_viewer::Action;

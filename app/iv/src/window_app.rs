@@ -15,7 +15,7 @@ use iv_render::{EguiPaint, RenderOutcome, Renderer, Scene, UiCapability};
 use iv_scan::{ScanConfig, Scanner, Verdict};
 use iv_thumbs::{ThumbConfig, ThumbEvent, ThumbRequest, ThumbService};
 use iv_ui::browser::{BrowserModel, BrowserState};
-use iv_viewer::{Action, AppRequest, Effects, Mode, ViewerConfig, ViewerState};
+use iv_viewer::{Action, AppRequest, Effects, FileOp, Mode, ViewerConfig, ViewerState};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -75,6 +75,8 @@ struct App {
     tree_rows_at: Option<Instant>,
     /// 사용자가 트리를 바꿈 (펼침·폴더 이동) — 바로 다시 만든다
     tree_dirty: bool,
+    /// 사용자가 만들거나 이름을 바꾼 폴더 — 비어 있어도 숨기지 않는다
+    keep_visible: HashSet<PathBuf>,
     /// 스캔 판정이 바뀜 — 다음 기회(초당 한 번, 누르고 있지 않을 때)에 다시 만든다
     tree_scan_changed: bool,
     /// 전체 보기 중 열린 폴더가 밖에서 바뀜 — 브라우저로 돌아오면 확인 (전체 보기 확대 상태를 깨지 않게)
@@ -144,6 +146,7 @@ impl App {
             tree_counts: Vec::new(),
             tree_rows_at: None,
             tree_dirty: true,
+            keep_visible: HashSet::new(),
             tree_scan_changed: false,
             browser: BrowserState::default(),
             thumb_failed: HashSet::new(),
@@ -205,6 +208,7 @@ impl App {
                     }
                 }
                 AppRequest::Trash => self.trash(el),
+                AppRequest::FileOp => self.file_op(el),
             }
         }
         if fx.redraw || fx.window_changed || fx.library_changed || fx.reveal {
@@ -248,6 +252,64 @@ impl App {
     }
     //#endregion
 
+    fn request_redraw(&self) {
+        if let Some(g) = &self.gfx {
+            g.window.request_redraw();
+        }
+    }
+
+    /// 자가 시험 중엔 시험 루트(IV_TREE_ROOTS) 안만 건드린다 — 사용자 파일 보호
+    fn selftest_allows(&self, p: &Path) -> bool {
+        if self.selftest.is_none() {
+            return true;
+        }
+        let roots: Vec<PathBuf> = std::env::var_os("IV_TREE_ROOTS").map(|v| std::env::split_paths(&v).filter_map(|p| p.canonicalize().ok()).collect()).unwrap_or_default();
+        let p = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let ok = roots.iter().any(|r| p.starts_with(r) && &p != r);
+        if !ok {
+            log::warn!("자가 시험: 시험 루트 밖은 건드리지 않음 {}", p.display());
+        }
+        ok
+    }
+
+    //#region 파일·폴더 작업 — 디스크 작업은 여기(iv-fsops), 목록 반영은 뷰어, 트리 반영은 여기
+    fn file_op(&mut self, el: &ActiveEventLoop) {
+        let Some(op) = self.viewer.take_file_op() else { return };
+        let target = match &op {
+            FileOp::NewFolder { parent, .. } => parent.join("x"),
+            FileOp::RenameFolder { path, .. } | FileOp::RenameFile { path, .. } => path.clone(),
+        };
+        let result = if !self.selftest_allows(&target) {
+            Err("시험 루트 밖".to_string())
+        } else {
+            match &op {
+                FileOp::NewFolder { parent, name } => iv_fsops::create_folder(parent, name),
+                FileOp::RenameFolder { path, name } | FileOp::RenameFile { path, name } => iv_fsops::rename(path, name),
+            }
+        };
+        match (&op, &result) {
+            (FileOp::NewFolder { parent, .. }, Ok(p)) => {
+                log::info!("새 폴더: {}", p.display());
+                // 새 폴더는 비어 있어도 트리에 보이게 (스캔이 '사진 없음'으로 숨기지 않게)
+                self.keep_visible.insert(p.clone());
+                self.tree.invalidate(parent);
+                self.tree.expand_to(p);
+            }
+            (FileOp::RenameFolder { path, .. }, Ok(p)) => {
+                log::info!("폴더 이름 바꿈: {} → {}", path.display(), p.display());
+                self.keep_visible.remove(path);
+                self.keep_visible.insert(p.clone());
+                self.tree.renamed(path, p);
+            }
+            (FileOp::RenameFile { path, .. }, Ok(p)) => log::info!("이름 바꿈: {} → {}", path.display(), p.display()),
+            (_, Err(e)) => log::warn!("파일 작업 실패: {e}"),
+        }
+        self.tree_dirty = true;
+        let fx = self.viewer.on_file_op(&op, &result, &self.loader);
+        self.apply(fx, el);
+    }
+    //#endregion
+
     /// 창이 있는 모니터의 긴 변 (물리 픽셀)
     fn monitor_side(&self) -> Option<u32> {
         let m = self.gfx.as_ref()?.window.current_monitor()?;
@@ -256,6 +318,25 @@ impl App {
     }
 
     fn handle(&mut self, a: Action, el: &ActiveEventLoop) {
+        //#region 이름 입력 대화 상자 열기 — UI 상태라 앱이 연다 (브라우저에서만)
+        match &a {
+            Action::BeginRename if self.viewer.mode == Mode::Browse => {
+                if let Some(p) = self.viewer.current().and_then(|e| e.path()).map(Path::to_path_buf) {
+                    self.browser.begin_rename_file(&p);
+                    self.request_redraw();
+                }
+                return;
+            }
+            Action::BeginNewFolder if self.viewer.mode == Mode::Browse => {
+                if let Some(d) = self.viewer.library.dir().map(Path::to_path_buf) {
+                    self.browser.begin_new_folder(&d);
+                    self.request_redraw();
+                }
+                return;
+            }
+            _ => {}
+        }
+        //#endregion
         if a == Action::Refresh {
             // 새로고침 = 고쳐졌을 수 있는 파일의 썸네일을 다시 시도
             self.thumbs.forget_failures();
@@ -397,7 +478,8 @@ impl App {
                 self.tree_scan_changed = false;
                 let open_dir = lib.dir();
                 let scanner = &self.scanner;
-                let hide = |p: &Path| open_dir.is_none_or(|d| !d.starts_with(p)) && scanner.verdict(p) == Verdict::Empty;
+                let keep = &self.keep_visible;
+                let hide = |p: &Path| open_dir.is_none_or(|d| !d.starts_with(p)) && !keep.iter().any(|k| k.starts_with(p)) && scanner.verdict(p) == Verdict::Empty;
                 self.tree_rows = self.tree.visible_rows_where(&hide);
                 self.tree_counts = self.tree_rows.iter().map(|r| scanner.info(&r.path).map(|i| (i.photos, i.folders))).collect();
                 self.tree_rows_at = Some(Instant::now());
@@ -567,6 +649,12 @@ impl App {
                     if let Some(g) = &self.gfx {
                         g.window.request_redraw();
                     }
+                    return Some(Instant::now() + Duration::from_millis(16));
+                }
+                Step::Type(text) => {
+                    self.injected.push_back(vec![egui::Event::Text(text)]);
+                    self.injected.push_back(vec![]);
+                    self.request_redraw();
                     return Some(Instant::now() + Duration::from_millis(16));
                 }
                 //#region 수식키 클릭 — egui 는 수식키를 ModifiersChanged 이벤트로 안다

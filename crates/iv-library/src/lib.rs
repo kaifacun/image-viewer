@@ -199,6 +199,24 @@ impl Library {
         true
     }
 
+    /// 파일 이름이 바뀌었을 때: 그 항목을 새 경로로 바꾸고 다시 정렬 (현재 위치는 그 항목을 따라간다).
+    /// 돌려주는 값 = (옛 id, 새 id).
+    pub fn rename_entry(&mut self, old: &Path, new: PathBuf) -> Option<(EntryId, EntryId)> {
+        let pos = self.entries.iter().position(|e| e.path() == Some(old))?;
+        let was_current = pos == self.index;
+        let old_id = self.entries[pos].id;
+        let e = Entry::from_path(new);
+        let new_id = e.id;
+        self.entries[pos] = e;
+        let cur = if was_current { Some(new_id) } else { self.current().map(|e| e.id) };
+        let (k, asc) = self.sort;
+        self.sort(k, asc);
+        if let Some(id) = cur {
+            self.index = self.position(id).unwrap_or(0);
+        }
+        Some((old_id, new_id))
+    }
+
     /// 현재 위치 기준 이웃: (앞으로 n개, 뒤로 m개) — 가까운 순
     pub fn neighbors(&self, ahead: usize, behind: usize) -> (Vec<&Entry>, Vec<&Entry>) {
         let a = (1..=ahead).filter_map(|k| self.entries.get(self.index + k)).collect();

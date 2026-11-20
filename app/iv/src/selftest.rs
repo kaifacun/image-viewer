@@ -20,6 +20,8 @@ pub enum Step {
     /// 실입력 주입 (점 좌표) — egui 의 맞음 판정·가려짐까지 거친다
     Click(f32, f32),
     DoubleClick(f32, f32),
+    /// 글 입력 (egui Text 이벤트 — 입력 칸에 포커스가 있을 때)
+    Type(String),
     /// 수식키를 누른 채 클릭 (cmd, shift)
     ModClick(f32, f32, bool, bool),
     /// 커서 위치에서 휠 (점, 양수 = 내용이 아래로 → 위쪽이 보임)
@@ -91,6 +93,7 @@ fn parse(t: &str) -> Option<Step> {
             Step::Scroll(x, y, dy)
         }
         "key" => Step::Key(v.to_ascii_lowercase()),
+        "type" => Step::Type(v.to_string()),
         "wait-thumbs" => Step::WaitThumbs(v.parse().unwrap_or(5000)),
         "wait-scan" => Step::WaitScan(v.parse().unwrap_or(10000)),
         // 동작 이름만 소문자로 (경로 값은 대소문자를 지킨다)
@@ -122,6 +125,16 @@ fn parse(t: &str) -> Option<Step> {
                     Action::OpenFolder(PathBuf::from(p))
                 } else if let Some(i) = other.strip_prefix("select=") {
                     Action::Select(i.parse().ok()?)
+                } else if let Some(n) = other.strip_prefix("newfolder=") {
+                    // 현재 폴더는 실행 때 알 수 없어 부모를 경로로 받는다: newfolder=<부모>|<이름>
+                    let (p, n) = n.split_once('|')?;
+                    Action::NewFolder { parent: PathBuf::from(p), name: n.to_string() }
+                } else if let Some(n) = other.strip_prefix("renamefile=") {
+                    let (p, n) = n.split_once('|')?;
+                    Action::RenameFile { path: PathBuf::from(p), name: n.to_string() }
+                } else if let Some(n) = other.strip_prefix("renamefolder=") {
+                    let (p, n) = n.split_once('|')?;
+                    Action::RenameFolder { path: PathBuf::from(p), name: n.to_string() }
                 } else if let Some(i) = other.strip_prefix("toggle=") {
                     Action::ToggleSelect(i.parse().ok()?)
                 } else if let Some(i) = other.strip_prefix("range=") {

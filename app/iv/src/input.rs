@@ -26,6 +26,7 @@ pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode)
             (Mode::Browse, NamedKey::PageUp) => Some(Action::GridPage(-1)),
             (Mode::Browse, NamedKey::Enter | NamedKey::Space) => Some(Action::EnterView),
             (Mode::Browse, NamedKey::Backspace) => Some(Action::ParentFolder),
+            (Mode::Browse, NamedKey::F2) => Some(Action::BeginRename),
             // 전체 보기
             (Mode::View, NamedKey::Escape) => Some(Action::ExitView),
             (Mode::View, NamedKey::ArrowRight | NamedKey::ArrowDown | NamedKey::PageDown | NamedKey::Space) => Some(Action::Next),
@@ -39,6 +40,7 @@ pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode)
             ("q" | "w", true, _) => Some(Action::Quit),
             ("r", true, _) => Some(Action::Refresh),
             ("a", true, Mode::Browse) => Some(Action::SelectAll),
+            ("n" | "N", true, Mode::Browse) if shift => Some(Action::BeginNewFolder),
             ("f", false, _) => Some(Action::ToggleFullscreen),
             ("=" | "+", _, Mode::View) => Some(Action::ZoomIn),
             ("-" | "_", _, Mode::View) => Some(Action::ZoomOut),
@@ -68,6 +70,7 @@ pub fn named(name: &str) -> Option<Key> {
         "pagedown" => NamedKey::PageDown,
         "space" => NamedKey::Space,
         "delete" => NamedKey::Delete,
+        "f2" => NamedKey::F2,
         _ => return None,
     }))
 }
