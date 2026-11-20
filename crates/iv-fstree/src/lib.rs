@@ -113,30 +113,49 @@ impl FolderTree {
         self.children.get(p).and_then(|r| r.as_ref().err()).map(|s| s.as_str())
     }
 
+    /// 루트 경로들 (트리에 보이는 그대로)
+    pub fn root_paths(&self) -> Vec<PathBuf> {
+        self.roots.iter().map(|(p, _)| p.clone()).collect()
+    }
+
     /// 펼쳐진 상태대로 평탄화한 줄 목록
     pub fn visible_rows(&self) -> Vec<Row> {
+        self.visible_rows_where(&|_| false)
+    }
+
+    /// `hide` 가 참인 폴더(와 그 하위)는 빼고 평탄화. 숨긴 것만 남은 폴더는 펼침 삼각형도 없다.
+    pub fn visible_rows_where(&self, hide: &dyn Fn(&Path) -> bool) -> Vec<Row> {
         let mut out = Vec::new();
         for (p, n) in &self.roots {
-            self.push_rows(p, n.clone(), 0, &mut out);
+            if !hide(p) {
+                self.push_rows(p, n.clone(), 0, hide, &mut out);
+            }
         }
         out
     }
 
-    fn push_rows(&self, p: &Path, name: String, depth: usize, out: &mut Vec<Row>) {
+    fn push_rows(&self, p: &Path, name: String, depth: usize, hide: &dyn Fn(&Path) -> bool, out: &mut Vec<Row>) {
         let expanded = self.expanded.contains(p);
         let kids = self.children.get(p);
         let has_children = match kids {
-            None => true,
-            Some(Ok(v)) => !v.is_empty(),
+            None => !hide(p),
+            Some(Ok(v)) => v.iter().any(|c| !hide(c)),
             Some(Err(_)) => false,
         };
         out.push(Row { path: p.to_path_buf(), name, depth, expanded, has_children });
         if expanded {
             if let Some(Ok(v)) = kids {
-                for c in v {
-                    self.push_rows(c, display_name(c), depth + 1, out);
+                for c in v.iter().filter(|c| !hide(c)) {
+                    self.push_rows(c, display_name(c), depth + 1, hide, out);
                 }
             }
+        }
+    }
+
+    /// 한 폴더의 하위 목록만 다시 읽게 한다 (새 폴더가 생겼을 때)
+    pub fn invalidate(&mut self, p: &Path) {
+        if self.children.remove(p).is_some() && self.expanded.contains(p) {
+            self.ensure_listed(p);
         }
     }
 }
@@ -195,6 +214,9 @@ mod tests {
         assert!(!t.visible_rows().iter().find(|r| r.name == "b").unwrap().has_children);
         t.toggle(&d.join("a"));
         assert_eq!(t.visible_rows().len(), 3);
+        // 숨김 조건: b 를 숨기면 줄에서 빠진다
+        let rows = t.visible_rows_where(&|p| p.ends_with("b"));
+        assert!(rows.iter().all(|r| r.name != "b"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

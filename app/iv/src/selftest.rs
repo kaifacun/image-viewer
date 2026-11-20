@@ -28,6 +28,8 @@ pub enum Step {
     Key(String),
     /// 화면에 보이는 썸네일이 모두 채워질 때까지 (최대 ms)
     WaitThumbs(u64),
+    /// 백그라운드 스캔이 끝날 때까지 (최대 ms)
+    WaitScan(u64),
 }
 
 pub struct SelfTest {
@@ -90,6 +92,7 @@ fn parse(t: &str) -> Option<Step> {
         }
         "key" => Step::Key(v.to_ascii_lowercase()),
         "wait-thumbs" => Step::WaitThumbs(v.parse().unwrap_or(5000)),
+        "wait-scan" => Step::WaitScan(v.parse().unwrap_or(10000)),
         // 동작 이름만 소문자로 (경로 값은 대소문자를 지킨다)
         "act" => Step::Act(match v.split_once('=').map_or(v.to_ascii_lowercase(), |(a, b)| format!("{}={b}", a.to_ascii_lowercase())).as_str() {
             "next" => Action::Next,

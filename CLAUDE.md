@@ -9,7 +9,7 @@
 - 새 사용자 기능 = `iv_viewer::Action` 추가 + `ViewerState::handle` 분기 + `app/iv/src/input.rs` 단축키.
 - 새 렌더러 = `iv_render::Renderer` 구현 + `app/iv/src/renderer.rs` 폴백 사슬.
 - 새 화면 패널 = `iv-ui` 에 그리기 함수 (상태 변경 금지, `Action`/`BrowserOut` 반환). 화면 모드는 `ViewerState::mode` 하나가 진실.
-- 썸네일은 `iv-thumbs`(앱이 조립), 폴더 트리는 `iv-fstree`(앱이 소유). iv-viewer 는 둘 다 모른다.
+- 썸네일은 `iv-thumbs`(앱이 조립), 폴더 트리는 `iv-fstree`(앱이 소유), 사진 폴더 스캔은 `iv-scan`(앱이 소유, 트리엔 `visible_rows_where` 술어로만 연결). iv-viewer 는 셋 다 모른다.
 - `app/iv` 만 모든 crate 를 안다. 다른 crate 끼리 역방향 의존 금지 (core ← decode/pipeline/library, viewer → pipeline/library/viewport).
 
 ## ★ 비직관적 사실 (다시 겪지 말 것)
@@ -40,6 +40,8 @@
 - 디코드 목표 크기는 창이 아니라 **모니터 긴 변**(`ViewerConfig.display_side`) — 창 크기 조절·전체 화면 때 재디코드 폭주 방지.
 - 브라우저 시험은 반드시 `IV_CACHE_DIR=scratch/cache IV_TREE_ROOTS=scratch` 로 (사용자 홈·사진이 트리/썸네일 캐시에 들어가지 않게). 인자 없는 실행은 홈을 연다 — 시험에 쓰지 않는다. `IV_START_DIR` 로 시작 폴더 지정.
 - **자가 시험 창은 포커스를 뺏지 않고(`with_active(false)`) 실제 키보드·마우스를 무시한다** — 예전엔 사용자가 터미널에서 친 ⌫ 가 시험 창에 들어가 상위 폴더로 올라간 뒤 사용자 파일을 지웠다. 휴지통 시험은 `IV_TRASH_DIR=scratch/trash-bin` + 사본 폴더(`scratch/trash-test`)로만, 시험 중 휴지통은 `IV_TREE_ROOTS` 밖 파일을 거부한다.
+- **스캔 판정은 3상태 — 모르면 숨기지 않는다**: 건너뛴 하위(링크·다른 루트·시스템 폴더·읽기 오류)가 있고 사진을 못 찾으면 Unknown. 사진 규칙은 격자(`Library::open`), 폴더 규칙은 트리(`list_subdirs`: 점 폴더·번들 제외)와 같아야 한다. 열린 폴더와 조상은 숨기지 않는다. 시험은 `wait-scan:ms`, 캡처 로그 끝에 스캔 상태.
+- 사용자 홈 전체 스캔은 직접 돌리지 않는다(시험은 `IV_TREE_ROOTS=scratch`).
 - 휴지통은 `iv-trash`(NSFileManager `trashItemAtURL`). 실패 시 `remove_file` 로 대체 금지.
 - 자가 시험 실입력: `click=x,y` `dblclick=x,y` `cmdclick:x,y` `shiftclick:x,y`(egui ModifiersChanged 주입) `scroll=x,y,dy`(점 좌표, egui 맞음 판정 경유), `key=right|enter|escape…`(단축키 표 경유), `wait-thumbs:ms`, `act:folder=|select=|activate=|toggle=|range=|selectall|trash|sort=size,desc|view|browse`.
 - 화면 검증: 앱 자가 캡처(IV_SELFTEST) 또는 `tools/winid.swift` 로 iv 창 ID 를 얻어 `screencapture -l <id>` (창 단위만).

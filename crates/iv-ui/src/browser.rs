@@ -140,6 +140,8 @@ pub struct BrowserModel<'a> {
     pub status: &'a str,
     pub sort: (SortKey, bool),
     pub failed: &'a HashSet<u64>,
+    /// 백그라운드 스캔 상태 (상태줄 오른쪽)
+    pub scan_status: &'a str,
     /// 미리보기 칸에 렌더러가 실제 프레임을 그리는가 (아니면 썸네일로 대신 채움)
     pub preview_has_frame: bool,
 }
@@ -170,7 +172,12 @@ pub fn draw(ctx: &egui::Context, st: &mut BrowserState, m: &BrowserModel<'_>) ->
         egui::Panel::top("iv-menu").show(ui, |ui| menu_bar(ui, st, m, &mut out));
         egui::Panel::top("iv-toolbar").show(ui, |ui| toolbar(ui, st, m, &mut out));
         egui::Panel::bottom("iv-status").show(ui, |ui| {
-            ui.label(RichText::new(m.status).size(12.5).color(Color32::from_gray(210)));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(m.status).size(12.5).color(Color32::from_gray(210)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(m.scan_status).size(12.0).color(Color32::from_gray(150)));
+                });
+            });
         });
         egui::Panel::left("iv-side").frame(egui::Frame::NONE).resizable(true).default_size(260.0).size_range(160.0..=600.0).show(ui, |ui| {
             // 미리보기 칸 — 투명 (렌더러가 아래에 이미지를 그린다)

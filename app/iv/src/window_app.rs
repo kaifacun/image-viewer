@@ -3,7 +3,7 @@
 //! 두 화면: 브라우저(트리·격자·미리보기) ↔ 전체 보기. 모드는 `ViewerState::mode` 하나가 진실이다.
 
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use iv_fstree::FolderTree;
 use iv_library::EntryId;
 use iv_pipeline::{Loader, LoaderConfig};
 use iv_render::{EguiPaint, RenderOutcome, Renderer, Scene, UiCapability};
+use iv_scan::{ScanConfig, Scanner, Verdict};
 use iv_thumbs::{ThumbConfig, ThumbEvent, ThumbRequest, ThumbService};
 use iv_ui::browser::{BrowserModel, BrowserState};
 use iv_viewer::{Action, AppRequest, Effects, Mode, ViewerConfig, ViewerState};
@@ -36,6 +37,8 @@ pub enum UserEvent {
     LoaderWake,
     /// 썸네일 서비스에 결과가 쌓였다
     ThumbWake,
+    /// 백그라운드 스캔이 진행됐다 (트리 숨김·상태줄 갱신)
+    ScanWake,
 }
 
 const BACKGROUND: [u8; 3] = [24, 24, 26];
@@ -63,6 +66,9 @@ struct App {
     thumbs: ThumbService,
     viewer: ViewerState,
     tree: FolderTree,
+    /// 백그라운드 사진 폴더 스캔 (트리에서 사진 없는 폴더 숨김)
+    scanner: Scanner,
+    wait_scan_until: Option<Instant>,
     browser: BrowserState,
     /// 썸네일 생성에 실패한 항목 (타일 경고·재요청 제외)
     thumb_failed: HashSet<u64>,
@@ -96,9 +102,16 @@ impl App {
         let loader_cfg = LoaderConfig::default();
         let gate = loader_cfg.gate.clone();
         let p1 = proxy.clone();
+        let p2 = proxy.clone();
         let loader = Loader::new(registry.clone(), loader_cfg, move || {
             let _ = p1.send_event(UserEvent::LoaderWake);
         });
+        //#region 백그라운드 스캔 — 트리 루트 전부, 현재 장 디코드에 양보
+        let tree = FolderTree::new(FolderTree::default_roots());
+        let scanner = Scanner::start(ScanConfig { roots: tree.root_paths(), extensions: extensions.clone(), gate: Some(gate.clone()) }, move || {
+            let _ = p2.send_event(UserEvent::ScanWake);
+        });
+        //#endregion
         let thumbs = ThumbService::new(registry, ThumbConfig { gate: Some(gate), ..Default::default() }, move || {
             let _ = proxy.send_event(UserEvent::ThumbWake);
         });
@@ -110,7 +123,9 @@ impl App {
             loader,
             thumbs,
             viewer,
-            tree: FolderTree::new(FolderTree::default_roots()),
+            tree,
+            scanner,
+            wait_scan_until: None,
             browser: BrowserState::default(),
             thumb_failed: HashSet::new(),
             last_requested: Vec::new(),
@@ -299,7 +314,7 @@ impl App {
             match g.renderer.capture(scene) {
                 Some((w, h, px)) => {
                     let ok = image::save_buffer(&path, &px, w, h, image::ExtendedColorType::Rgba8).is_ok();
-                    log::info!("자가 시험 캡처 {} {w}x{h} {} | {status}", path.display(), if ok { "저장" } else { "실패" });
+                    log::info!("자가 시험 캡처 {} {w}x{h} {} | {status} | {}", path.display(), if ok { "저장" } else { "실패" }, self.scanner.status().text());
                 }
                 None => log::warn!("자가 시험 캡처 실패"),
             }
@@ -348,8 +363,14 @@ impl App {
         let browse = self.viewer.mode == Mode::Browse;
         let mut bout = None;
         let out = if browse {
-            let tree_rows = self.tree.visible_rows();
             let lib = &self.viewer.library;
+            //#region 트리: 스캔으로 '사진 없음'이 확인된 폴더는 숨긴다 (열려 있는 폴더와 그 조상은 예외)
+            let open_dir = lib.dir();
+            let scanner = &self.scanner;
+            let hide = |p: &Path| open_dir.is_none_or(|d| !d.starts_with(p)) && scanner.verdict(p) == Verdict::Empty;
+            let tree_rows = self.tree.visible_rows_where(&hide);
+            let scan_status = scanner.status().text();
+            //#endregion
             let cur = lib.current().map(|e| e.id.0);
             let model = BrowserModel {
                 entries: lib.entries(),
@@ -360,6 +381,7 @@ impl App {
                 status,
                 sort: lib.sort_order(),
                 failed: &self.thumb_failed,
+                scan_status: &scan_status,
                 preview_has_frame: self.viewer.shown.as_ref().is_some_and(|s| Some(s.key) == cur),
             };
             let browser = &mut self.browser;
@@ -448,6 +470,16 @@ impl App {
 
     /// 자가 시험 단계 실행
     fn run_selftest(&mut self, el: &ActiveEventLoop) -> Option<Instant> {
+        if let Some(until) = self.wait_scan_until {
+            if Instant::now() < until && !self.scanner.status().done {
+                return Some(Instant::now() + Duration::from_millis(30));
+            }
+            log::info!("자가 시험: 스캔 {}", if self.scanner.status().done { "완료" } else { "시간 초과" });
+            self.wait_scan_until = None;
+            if let Some(g) = &self.gfx {
+                g.window.request_redraw();
+            }
+        }
         if let Some(until) = self.wait_thumbs_until {
             if Instant::now() < until && !self.thumbs_complete() {
                 return Some(Instant::now() + Duration::from_millis(30));
@@ -553,6 +585,10 @@ impl App {
                     }
                     None => log::warn!("자가 시험: 알 수 없는 키 {name}"),
                 },
+                Step::WaitScan(ms) => {
+                    self.wait_scan_until = Some(Instant::now() + Duration::from_millis(ms));
+                    return Some(Instant::now() + Duration::from_millis(30));
+                }
                 Step::WaitThumbs(ms) => {
                     self.wait_thumbs_until = Some(Instant::now() + Duration::from_millis(ms));
                     return Some(Instant::now() + Duration::from_millis(30));
@@ -648,6 +684,13 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 self.apply(fx, el);
             }
+            UserEvent::ScanWake => {
+                if self.viewer.mode == Mode::Browse {
+                    if let Some(g) = &self.gfx {
+                        g.window.request_redraw();
+                    }
+                }
+            }
             UserEvent::ThumbWake => {
                 // egui 가 없어도 반드시 drain (pending 플래그 리셋)
                 let evs = self.thumbs.drain();
@@ -677,7 +720,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         //#region 자가 시험 중엔 실제 키보드·마우스를 무시 — 창이 포커스를 가져가 사용자의 타자(⌫ 등)가 새어 들어오지 않게
         if self.selftest.is_some()
-            && matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::DroppedFile(_))
+            && matches!(event, WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::DroppedFile(_))
         {
             log::debug!("자가 시험: 실제 입력 무시 {event:?}");
             return;

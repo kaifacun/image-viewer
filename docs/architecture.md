@@ -20,7 +20,9 @@ crates/
   iv-pipeline    디코드 작업 큐(워커 스레드) + 세대(generation) id + 미리 읽기 창 + 메모리 상한 LRU
   iv-thumbs      썸네일 서비스: 보이는 목록 우선 워커 + 메모리 LRU + 디스크 캐시 (Gate 로 전체 보기에 양보)
   iv-library     폴더 스캔·정렬(이름·날짜·크기·형식)·현재 위치·지원 확장자 필터
-  iv-fstree      폴더 트리 모델 (루트·지연 나열·펼침 상태) — std 만
+  iv-fstree      폴더 트리 모델 (루트·지연 나열·펼침 상태, 숨김 조건은 술어로 받음) — std 만
+  iv-scan        백그라운드 사진 폴더 스캔 (낮은 QoS 스레드, Gate 양보) → 폴더별 Verdict(HasPhotos|Empty|Unknown)
+  iv-trash       OS 휴지통 이동 (macOS NSFileManager) — 영구 삭제로 대체하지 않음
   iv-viewport    확대·이동·화면 맞춤 수학 (순수 함수, 단위 시험)
   iv-render      Renderer trait (백엔드 무관)
   iv-render-wgpu GPU 렌더러 (텍스처·밉맵·변환 셰이더·egui 오버레이)
@@ -38,6 +40,8 @@ iv-core  ←  iv-pipeline      (파이프라인은 Decoder trait만 안다 — �
 iv-core  ←  iv-library
 iv-core, iv-imageops ← iv-thumbs   (썸네일은 디코더 trait 만 안다)
 iv-fstree (독립, std 만)
+iv-core ← iv-scan          (트리·뷰어를 모른다 — 앱이 판정을 트리 숨김 술어로 잇는다)
+iv-trash (독립)
 iv-viewport (독립)
 iv-core, iv-viewport ← iv-render
 iv-viewer → iv-pipeline, iv-library, iv-viewport   (썸네일·트리는 모른다)
