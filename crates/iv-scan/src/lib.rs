@@ -31,6 +31,16 @@ pub enum Verdict {
     HasPhotos,
 }
 
+/// 폴더 하나의 스캔 결과 (트리 옆 숫자)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirInfo {
+    pub verdict: Verdict,
+    /// 이 폴더에 직접 든 사진 수
+    pub photos: u32,
+    /// 트리에 보일 하위 폴더 수 (사진 없음이 확인된 것은 뺀다)
+    pub folders: u32,
+}
+
 /// 상태줄에 보일 진행 상황
 #[derive(Clone, Debug, Default)]
 pub struct ScanStatus {
@@ -90,8 +100,8 @@ pub struct ScanConfig {
 }
 
 struct Shared {
-    /// 정규 경로 → 사진 있음(true)/없음(false). 없는 키 = 모름.
-    verdicts: RwLock<HashMap<PathBuf, bool>>,
+    /// 정규 경로 → 스캔 결과. 없는 키 = 아직 모름.
+    verdicts: RwLock<HashMap<PathBuf, DirInfo>>,
     status: Mutex<ScanStatus>,
     stop: AtomicBool,
     /// 스캔 후 바뀐 폴더 (정규 경로) — 앱이 가져가 트리·격자를 맞춘다
@@ -141,7 +151,8 @@ impl Scanner {
             };
             //#endregion
             let t0 = Instant::now();
-            let mut w = Walker { shared: s.clone(), roots: roots.clone(), extensions: cfg.extensions, gate: cfg.gate, ignore, wake: Box::new(wake), last_wake: Instant::now(), count: 0, counts: HashMap::new() };
+            let unwatched = roots.iter().filter(|r| !watching || r.as_path() == Path::new("/") || !is_local_volume(r)).cloned().collect();
+            let mut w = Walker { shared: s.clone(), roots: roots.clone(), extensions: cfg.extensions, gate: cfg.gate, ignore, wake: Box::new(wake), last_wake: Instant::now(), count: 0, counts: HashMap::new(), unwatched };
             for r in &roots {
                 if w.stopped() {
                     return;
@@ -172,6 +183,11 @@ impl Scanner {
 
     /// 트리 경로의 판정 (매 프레임 불려도 되게 가볍게 — 파일 시스템을 건드리지 않는다)
     pub fn verdict(&self, p: &Path) -> Verdict {
+        self.info(p).map_or(Verdict::Unknown, |i| i.verdict)
+    }
+
+    /// 트리 경로의 스캔 결과 (아직 안 훑었으면 None)
+    pub fn info(&self, p: &Path) -> Option<DirInfo> {
         let mapped;
         let key = match self.aliases.iter().find(|(a, _)| p.starts_with(a)) {
             Some((a, c)) => {
@@ -180,12 +196,7 @@ impl Scanner {
             }
             None => p,
         };
-        let v = self.shared.verdicts.read().unwrap_or_else(|e| e.into_inner());
-        match v.get(key) {
-            Some(true) => Verdict::HasPhotos,
-            Some(false) => Verdict::Empty,
-            None => Verdict::Unknown,
-        }
+        self.shared.verdicts.read().unwrap_or_else(|e| e.into_inner()).get(key).copied()
     }
 
     pub fn status(&self) -> ScanStatus {
@@ -215,14 +226,18 @@ struct Walker {
     count: u64,
     /// 폴더 → 직접 든 사진 수 (상태줄 합계를 변경 때 바로잡기 위해)
     counts: HashMap<PathBuf, u64>,
+    /// 감시하지 않는 루트 (/ · 원격 볼륨 · 감시 실패 시 전부) — 여기선 "없음"을 공개하지 않는다
+    unwatched: Vec<PathBuf>,
 }
 
 /// 한 폴더 나열 결과
 struct Listing {
     photos: u64,
     subdirs: Vec<PathBuf>,
-    /// 판정에 넣지 못한 하위가 있음 (폴더 링크·종류를 모름)
+    /// 판정에 넣지 못한 하위가 있음 (종류를 모름)
     unknown_child: bool,
+    /// 폴더를 가리키는 링크의 대상 (정규 경로) — 따라 들어가지 않고 대상의 판정을 빌린다
+    links: Vec<PathBuf>,
 }
 
 impl Walker {
@@ -245,7 +260,7 @@ impl Walker {
     //#region 한 폴더 나열 — 사진 세기(격자 규칙), 하위 폴더 모으기(트리 규칙)
     fn list(&self, dir: &Path) -> Option<Listing> {
         let rd = std::fs::read_dir(dir).ok()?;
-        let mut l = Listing { photos: 0, subdirs: Vec::new(), unknown_child: false };
+        let mut l = Listing { photos: 0, subdirs: Vec::new(), unknown_child: false, links: Vec::new() };
         for e in rd.flatten() {
             let name = e.file_name();
             if name.to_string_lossy().starts_with('.') {
@@ -259,7 +274,10 @@ impl Walker {
             if ft.is_symlink() {
                 // 링크는 따라가지 않는다: 폴더를 가리키면 트리에 보이므로 "모름", 파일이면 격자처럼 사진으로 센다
                 match std::fs::metadata(&path) {
-                    Ok(m) if m.is_dir() => l.unknown_child |= !is_bundle(&path),
+                    Ok(m) if m.is_dir() && !is_bundle(&path) => match path.canonicalize() {
+                        Ok(t) => l.links.push(t),
+                        Err(_) => l.unknown_child = true,
+                    },
                     Ok(m) if m.is_file() => l.photos += u64::from(self.is_photo(&path)),
                     _ => {}
                 }
@@ -276,16 +294,16 @@ impl Walker {
     //#endregion
 
     //#region 판정·합계 기록
-    fn set_verdict(&self, dir: &Path, v: Verdict) {
-        let mut m = self.shared.verdicts.write().unwrap_or_else(|e| e.into_inner());
-        match v {
-            Verdict::Unknown => {
-                m.remove(dir);
-            }
-            v => {
-                m.insert(dir.to_path_buf(), v == Verdict::HasPhotos);
-            }
-        }
+    fn set_info(&self, dir: &Path, v: Verdict, photos: u64, folders: u32) {
+        // 감시하지 않는 곳의 "없음"은 나중에 사진이 생겨도 알 수 없으니 공개하지 않는다 (숨김이 굳지 않게)
+        let verdict = if v == Verdict::Empty && !self.watched(dir) { Verdict::Unknown } else { v };
+        let info = DirInfo { verdict, photos: photos.min(u32::MAX as u64) as u32, folders };
+        self.shared.verdicts.write().unwrap_or_else(|e| e.into_inner()).insert(dir.to_path_buf(), info);
+    }
+
+    /// 읽지 못한 폴더 — 숫자 없이 모름으로
+    fn set_unreadable(&self, dir: &Path) {
+        self.shared.verdicts.write().unwrap_or_else(|e| e.into_inner()).remove(dir);
     }
 
     fn record_count(&mut self, dir: &Path, photos: u64) {
@@ -328,15 +346,33 @@ impl Walker {
         }
         self.yield_now();
         let Some(l) = self.list(dir) else {
-            self.set_verdict(dir, Verdict::Unknown);
+            self.set_unreadable(dir);
             return Verdict::Unknown;
         };
         self.record_count(dir, l.photos);
         //#region 하위 판정 — 다른 루트·시스템 폴더는 들어가지 않고 이미 아는 판정(없으면 모름)을 쓴다
         let mut any_photos = l.photos > 0;
         let mut unknown = l.unknown_child;
+        let mut folders = 0u32;
+        for t in &l.links {
+            let v = self.link_verdict(t);
+            folders += u32::from(v != Verdict::Empty);
+            match v {
+                Verdict::HasPhotos => any_photos = true,
+                Verdict::Unknown => unknown = true,
+                Verdict::Empty => {}
+            }
+        }
+        let photos = l.photos;
         for sub in l.subdirs {
-            let v = if self.skip(&sub, is_root.then_some(dir)) { self.known(&sub) } else { self.walk(&sub, false) };
+            let v = if self.is_system(&sub) {
+                Verdict::Empty
+            } else if self.skip(&sub, is_root.then_some(dir)) {
+                self.known(&sub)
+            } else {
+                self.walk(&sub, false)
+            };
+            folders += u32::from(v != Verdict::Empty);
             match v {
                 Verdict::HasPhotos => any_photos = true,
                 Verdict::Unknown => unknown = true,
@@ -345,7 +381,7 @@ impl Walker {
         }
         //#endregion
         let v = combine(any_photos, unknown || self.stopped());
-        self.set_verdict(dir, v);
+        self.set_info(dir, v, photos, folders);
         self.maybe_wake();
         v
     }
@@ -354,7 +390,7 @@ impl Walker {
     fn shallow(&mut self, dir: &Path, walk_new: bool) -> Verdict {
         let is_root = self.roots.iter().any(|r| r == dir);
         let Some(l) = self.list(dir) else {
-            self.set_verdict(dir, Verdict::Unknown);
+            self.set_unreadable(dir);
             return Verdict::Unknown;
         };
         self.record_count(dir, l.photos);
@@ -366,12 +402,23 @@ impl Walker {
         }
         let mut any_photos = l.photos > 0;
         let mut unknown = l.unknown_child;
+        let mut folders = 0u32;
+        for t in &l.links {
+            let v = self.link_verdict(t);
+            folders += u32::from(v != Verdict::Empty);
+            match v {
+                Verdict::HasPhotos => any_photos = true,
+                Verdict::Unknown => unknown = true,
+                Verdict::Empty => {}
+            }
+        }
         for sub in &l.subdirs {
             let skip = self.skip(sub, is_root.then_some(dir));
-            let mut v = self.known(sub);
+            let mut v = if self.is_system(sub) { Verdict::Empty } else { self.known(sub) };
             if v == Verdict::Unknown && walk_new && !skip {
                 v = self.walk(sub, false);
             }
+            folders += u32::from(v != Verdict::Empty);
             match v {
                 Verdict::HasPhotos => any_photos = true,
                 Verdict::Unknown => unknown = true,
@@ -379,7 +426,7 @@ impl Walker {
             }
         }
         let v = combine(any_photos, unknown);
-        self.set_verdict(dir, v);
+        self.set_info(dir, v, l.photos, folders);
         v
     }
 
@@ -486,11 +533,7 @@ impl Walker {
     //#endregion
 
     fn known(&self, p: &Path) -> Verdict {
-        match self.shared.verdicts.read().unwrap_or_else(|e| e.into_inner()).get(p) {
-            Some(true) => Verdict::HasPhotos,
-            Some(false) => Verdict::Empty,
-            None => Verdict::Unknown,
-        }
+        self.shared.verdicts.read().unwrap_or_else(|e| e.into_inner()).get(p).map_or(Verdict::Unknown, |i| i.verdict)
     }
 
     /// 들어가지 않을 폴더: 다른 루트(따로 훑는다), 시스템 루트(/) 아래의 시스템 폴더, 홈의 Library
@@ -498,18 +541,35 @@ impl Walker {
         if self.roots.iter().any(|r| r == p) {
             return true;
         }
-        if root_parent == Some(Path::new("/")) {
-            let n = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if matches!(n, "System" | "Library" | "Applications" | "private" | "usr" | "bin" | "sbin" | "opt" | "cores" | "dev" | "Volumes" | "etc" | "tmp" | "var") {
-                return true;
-            }
-        }
-        p.file_name().is_some_and(|n| n == "Library") && p.parent().is_some_and(|par| std::env::var_os("HOME").is_some_and(|h| par == Path::new(&h)))
+        // /Volumes 아래는 볼륨마다 따로 루트다
+        root_parent == Some(Path::new("/")) && p == Path::new("/Volumes") || self.is_system(p)
+    }
+
+    /// 폴더 링크의 판정: 시스템 폴더면 없음, 이미 훑은 곳이면 그 판정, 아니면 모름
+    fn link_verdict(&self, target: &Path) -> Verdict {
+        if self.is_system(target) { Verdict::Empty } else { self.known(target) }
+    }
+
+    /// 시스템 폴더인가 — 단, 루트 자체가 시스템 폴더 안이면(예: /private/var 의 임시 폴더) 그 루트 아래는 예외
+    fn is_system(&self, p: &Path) -> bool {
+        is_system_dir(p) && !self.roots.iter().any(|r| p.starts_with(r) && is_system_dir(r))
+    }
+
+    /// FSEvents 로 감시되는 루트 아래인가 (가장 가까운 루트 기준)
+    fn watched(&self, p: &Path) -> bool {
+        self.roots.iter().filter(|r| p.starts_with(r)).max_by_key(|r| r.components().count()).is_some_and(|r| !self.unwatched.contains(r))
     }
 
     fn is_photo(&self, p: &Path) -> bool {
         p.extension().and_then(|e| e.to_str()).is_some_and(|e| self.extensions.contains(e.to_ascii_lowercase().as_str()))
     }
+}
+
+/// 사진 보관 장소가 아닌 시스템 폴더 — 정책상 "사진 없음" (들어가지 않는다).
+/// 설치 디스크의 `Applications → /Applications` 링크 같은 것 때문에 빈 볼륨이 숨겨지지 않던 문제를 막는다.
+fn is_system_dir(p: &Path) -> bool {
+    const SYS: [&str; 13] = ["/System", "/Library", "/Applications", "/private", "/usr", "/bin", "/sbin", "/opt", "/cores", "/dev", "/etc", "/tmp", "/var"];
+    SYS.iter().any(|s| p.starts_with(s)) || std::env::var_os("HOME").is_some_and(|h| p.starts_with(Path::new(&h).join("Library")))
 }
 
 /// 사진을 찾았으면 있음, 아니면 확신 못 하는 하위가 있을 때 모름, 그 밖엔 없음
@@ -576,7 +636,7 @@ mod tests {
     fn tree(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("iv-scan-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        for s in ["photo", "empty", "deep/x/y", "text", ".dot", "mixed/sub", "onlybundle/z.app", "linkonly"] {
+        for s in ["photo", "empty", "deep/x/y", "text", ".dot", "mixed/sub", "onlybundle/z.app", "linkonly", "syslink"] {
             std::fs::create_dir_all(d.join(s)).unwrap();
         }
         for f in ["photo/a.JPG", "deep/x/y/b.png", ".dot/c.jpg", "onlybundle/z.app/d.jpg"] {
@@ -585,6 +645,8 @@ mod tests {
         std::fs::write(d.join("text/notes.txt"), b"x").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink(d.join("photo"), d.join("linkonly/to-photo")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/Applications", d.join("syslink/Applications")).unwrap();
         d
     }
 
@@ -615,11 +677,16 @@ mod tests {
         assert_eq!(v("mixed"), Verdict::Empty);
         // 번들 안 사진은 트리·격자 어디에도 안 보이므로 빈 폴더
         assert_eq!(v("onlybundle"), Verdict::Empty);
-        // 폴더 링크는 따라가지 않으므로 모름 → 숨기지 않음
-        assert_eq!(v("linkonly"), Verdict::Unknown);
+        // 폴더 링크는 따라가지 않고 대상 판정을 빌린다 — 대상을 먼저 훑었으면 있음, 아니면 모름 (어느 쪽이든 숨기지 않음)
+        assert_ne!(v("linkonly"), Verdict::Empty);
+        // 시스템 폴더 링크(설치 디스크의 Applications)만 있는 폴더는 없음
+        assert_eq!(v("syslink"), Verdict::Empty);
         assert_eq!(s.verdict(&c), Verdict::HasPhotos);
         let st = s.status();
         assert_eq!(st.photos, 2);
+        // 트리 옆 숫자: 직접 든 사진, 보일 하위 폴더 (빈 폴더 empty·text·mixed·onlybundle·syslink 는 빼고 photo·deep·linkonly)
+        assert_eq!(s.info(&c.join("photo")).map(|i| (i.photos, i.folders)), Some((1, 0)));
+        assert_eq!(s.info(&c).map(|i| i.folders), Some(3));
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -115,3 +115,60 @@ fn file_arg_opens_view_and_no_browse_without_ui() {
     assert_eq!(v.mode, Mode::View);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// 여러 장 선택: ⌘ 토글 · ⇧ 범위 · 그냥 클릭은 하나로 · 정렬해도 유지 · 다 풀면 휴지통 대상 없음
+#[test]
+fn multi_select_rules() {
+    let (d, l, mut v) = setup("sel", 8);
+    let _ = v.open(&d, &l);
+    let names = |v: &ViewerState| {
+        let mut n: Vec<String> = v.trash_targets().iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        n.sort();
+        n
+    };
+    let _ = v.handle(Action::Select(1), &l);
+    assert_eq!(names(&v), ["img01.png"]);
+    let _ = v.handle(Action::ToggleSelect(3), &l);
+    assert_eq!(names(&v), ["img01.png", "img03.png"]);
+    // 범위는 마지막 기준(3)부터
+    let _ = v.handle(Action::RangeSelect(5), &l);
+    assert_eq!(names(&v), ["img03.png", "img04.png", "img05.png"]);
+    // 정렬해도 선택 유지
+    let _ = v.handle(Action::Sort(SortKey::Size, true), &l);
+    assert_eq!(names(&v).len(), 3);
+    let _ = v.handle(Action::Sort(SortKey::Name, true), &l);
+    // 이미 현재 항목을 그냥 클릭해도 여러 장 선택이 풀린다
+    let cur = v.library.index();
+    let fx = v.handle(Action::Select(cur), &l);
+    assert!(fx.redraw);
+    assert_eq!(names(&v).len(), 1);
+    // 마지막 하나도 풀면 휴지통 대상이 없다 (회색 테두리 항목을 지우지 않음)
+    let _ = v.handle(Action::ToggleSelect(cur), &l);
+    assert!(v.trash_targets().is_empty());
+    assert_eq!(v.handle(Action::Trash, &l).app, None);
+    // 모두 선택
+    let _ = v.handle(Action::SelectAll, &l);
+    assert_eq!(v.trash_targets().len(), 8);
+    // 전체 보기에서는 보고 있는 장만
+    let _ = v.handle(Action::EnterView, &l);
+    assert_eq!(v.trash_targets().len(), 1);
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// 휴지통 결과 반영: 성공한 것만 빠지고 다음 장으로, 실패는 오류로 남는다
+#[test]
+fn on_trashed_removes_only_successes() {
+    let (d, l, mut v) = setup("trash", 6);
+    let _ = v.open(&d, &l);
+    let _ = v.handle(Action::Select(1), &l);
+    let _ = v.handle(Action::RangeSelect(3), &l);
+    let t = v.trash_targets();
+    assert_eq!(t.len(), 3);
+    // 두 장만 성공했다고 알린다
+    let fx = v.on_trashed(&t[..2], &["img03.png (권한 없음)".to_string()], &l);
+    assert!(fx.library_changed);
+    assert_eq!(v.library.len(), 4);
+    assert_eq!(v.current().unwrap().name, "img03.png");
+    assert!(v.error.as_deref().unwrap_or("").contains("1개"));
+    let _ = std::fs::remove_dir_all(&d);
+}

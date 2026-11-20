@@ -520,11 +520,10 @@ impl ViewerState {
     //#endregion
 
     //#region 휴지통
-    /// 휴지통으로 보낼 파일: 전체 보기는 보고 있는 장만, 브라우저는 선택된 항목(목록 순서)
+    /// 휴지통으로 보낼 파일: 전체 보기는 보고 있는 장만, 브라우저는 체크된 항목(목록 순서) — 다 풀었으면 없음
     pub fn trash_targets(&self) -> Vec<PathBuf> {
-        let current = || self.library.current().and_then(|e| e.path()).map(Path::to_path_buf).into_iter().collect();
-        if self.mode == Mode::View || self.marked.is_empty() {
-            return current();
+        if self.mode == Mode::View {
+            return self.library.current().and_then(|e| e.path()).map(Path::to_path_buf).into_iter().collect();
         }
         self.library.entries().iter().filter(|e| self.marked.contains(&e.id)).filter_map(|e| e.path().map(Path::to_path_buf)).collect()
     }

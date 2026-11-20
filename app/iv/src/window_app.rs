@@ -69,6 +69,14 @@ struct App {
     /// 백그라운드 사진 폴더 스캔 (트리에서 사진 없는 폴더 숨김)
     scanner: Scanner,
     wait_scan_until: Option<Instant>,
+    /// 트리 줄 캐시 — 스캔 판정이 바뀌어도 초당 한 번, 마우스를 누르고 있지 않을 때만 다시 만든다 (클릭 중 줄이 밀리지 않게)
+    tree_rows: Vec<iv_fstree::Row>,
+    tree_counts: Vec<Option<(u32, u32)>>,
+    tree_rows_at: Option<Instant>,
+    /// 사용자가 트리를 바꿈 (펼침·폴더 이동) — 바로 다시 만든다
+    tree_dirty: bool,
+    /// 스캔 판정이 바뀜 — 다음 기회(초당 한 번, 누르고 있지 않을 때)에 다시 만든다
+    tree_scan_changed: bool,
     /// 전체 보기 중 열린 폴더가 밖에서 바뀜 — 브라우저로 돌아오면 확인 (전체 보기 확대 상태를 깨지 않게)
     dir_dirty: bool,
     browser: BrowserState,
@@ -130,6 +138,11 @@ impl App {
             scanner,
             wait_scan_until: None,
             dir_dirty: false,
+            tree_rows: Vec::new(),
+            tree_counts: Vec::new(),
+            tree_rows_at: None,
+            tree_dirty: true,
+            tree_scan_changed: false,
             browser: BrowserState::default(),
             thumb_failed: HashSet::new(),
             last_requested: Vec::new(),
@@ -172,6 +185,7 @@ impl App {
             if let Some(d) = &dir {
                 self.tree.expand_to(d);
             }
+            self.tree_dirty = true;
         }
         if fx.reveal && !self.viewer.library.is_empty() {
             self.browser.scroll_to = Some(self.viewer.library.index());
@@ -375,11 +389,19 @@ impl App {
         let out = if browse {
             let lib = &self.viewer.library;
             //#region 트리: 스캔으로 '사진 없음'이 확인된 폴더는 숨긴다 (열려 있는 폴더와 그 조상은 예외)
-            let open_dir = lib.dir();
-            let scanner = &self.scanner;
-            let hide = |p: &Path| open_dir.is_none_or(|d| !d.starts_with(p)) && scanner.verdict(p) == Verdict::Empty;
-            let tree_rows = self.tree.visible_rows_where(&hide);
-            let scan_status = scanner.status().text();
+            let pointer_down = ctx.input(|i| i.pointer.any_down());
+            let stale = self.tree_rows_at.is_none_or(|t| t.elapsed() >= Duration::from_secs(1));
+            if self.tree_dirty || (self.tree_scan_changed && stale && !pointer_down) {
+                self.tree_scan_changed = false;
+                let open_dir = lib.dir();
+                let scanner = &self.scanner;
+                let hide = |p: &Path| open_dir.is_none_or(|d| !d.starts_with(p)) && scanner.verdict(p) == Verdict::Empty;
+                self.tree_rows = self.tree.visible_rows_where(&hide);
+                self.tree_counts = self.tree_rows.iter().map(|r| scanner.info(&r.path).map(|i| (i.photos, i.folders))).collect();
+                self.tree_rows_at = Some(Instant::now());
+                self.tree_dirty = false;
+            }
+            let scan_status = self.scanner.status().text();
             //#endregion
             let cur = lib.current().map(|e| e.id.0);
             let model = BrowserModel {
@@ -387,7 +409,8 @@ impl App {
                 selected: (!lib.is_empty()).then(|| lib.index()),
                 marked: self.viewer.marked(),
                 dir: lib.dir(),
-                tree: &tree_rows,
+                tree: &self.tree_rows,
+                tree_counts: &self.tree_counts,
                 status,
                 sort: lib.sort_order(),
                 failed: &self.thumb_failed,
@@ -409,6 +432,11 @@ impl App {
         state.handle_platform_output(&g.window, out.platform_output);
         let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay).unwrap_or(Duration::MAX);
         self.repaint_at = (delay < Duration::from_secs(10)).then(|| Instant::now() + delay);
+        // 미뤄 둔 트리 갱신이 있으면 곧 다시 그린다
+        if browse && self.tree_scan_changed {
+            let t = Instant::now() + Duration::from_millis(300);
+            self.repaint_at = Some(self.repaint_at.map_or(t, |r| r.min(t)));
+        }
         let ppp = out.pixels_per_point;
         let primitives = ctx.tessellate(out.shapes, ppp);
         let paint = EguiPaint { primitives, textures_delta: out.textures_delta, pixels_per_point: ppp };
@@ -425,6 +453,7 @@ impl App {
         let mut redraw = false;
         if let Some(p) = toggle {
             self.tree.toggle(&p);
+            self.tree_dirty = true;
             redraw = true;
         }
         if area != self.preview_area {
@@ -695,6 +724,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.apply(fx, el);
             }
             UserEvent::ScanWake => {
+                self.tree_scan_changed = true;
                 //#region 바뀐 폴더 반영 — 트리는 그 폴더 하위 목록만 다시 읽고, 열린 폴더면 목록이 달라졌을 때만 새로고침
                 let changed = self.scanner.take_changed();
                 let open_dir = self.viewer.library.dir().map(Path::to_path_buf);

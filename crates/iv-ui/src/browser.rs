@@ -137,6 +137,8 @@ pub struct BrowserModel<'a> {
     pub marked: &'a HashSet<EntryId>,
     pub dir: Option<&'a Path>,
     pub tree: &'a [Row],
+    /// 트리 줄마다 (이 폴더의 사진 수, 보일 하위 폴더 수) — 스캔 전이면 None
+    pub tree_counts: &'a [Option<(u32, u32)>],
     pub status: &'a str,
     pub sort: (SortKey, bool),
     pub failed: &'a HashSet<u64>,
@@ -222,7 +224,7 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
                 out.actions.push(Action::Refresh);
             }
             ui.separator();
-            if ui.add_enabled(m.selected.is_some(), egui::Button::new(trash_label(m))).clicked() {
+            if ui.add_enabled(!m.marked.is_empty(), egui::Button::new(trash_label(m))).clicked() {
                 out.actions.push(Action::Trash);
             }
             ui.separator();
@@ -287,7 +289,7 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
         if ui.add_enabled(m.selected.is_some(), egui::Button::new("전체 보기")).on_hover_text("선택한 사진 크게 보기 (Enter·더블클릭)").clicked() {
             out.actions.push(Action::EnterView);
         }
-        if ui.add_enabled(m.selected.is_some(), egui::Button::new("휴지통")).on_hover_text("선택한 사진을 휴지통으로 (⌘⌫)").clicked() {
+        if ui.add_enabled(!m.marked.is_empty(), egui::Button::new("휴지통")).on_hover_text("선택한 사진을 휴지통으로 (⌘⌫)").clicked() {
             out.actions.push(Action::Trash);
         }
         ui.separator();
@@ -320,10 +322,13 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
 fn folder_tree(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
     egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
-        for row in m.tree {
-            ui.horizontal(|ui| {
+        for (k, row) in m.tree.iter().enumerate() {
+            // 줄 id 를 경로로 고정 — 스캔으로 위 줄이 숨겨져 줄이 밀려도 누르던 줄의 클릭이 사라지지 않게
+            ui.push_id(&row.path, |ui| ui.horizontal(|ui| {
                 ui.add_space(row.depth as f32 * 14.0);
-                if row.has_children {
+                // 스캔으로 보일 하위 폴더가 없다고 알면 펼침 삼각형을 뺀다
+                let counted = m.tree_counts.get(k).copied().flatten();
+                if row.has_children && counted.is_none_or(|(_, f)| f > 0) {
                     let arrow = if row.expanded { "▼" } else { "▶" };
                     if ui.add(egui::Button::new(RichText::new(arrow).size(10.0)).frame(false).min_size(Vec2::new(14.0, 14.0))).clicked() {
                         out.tree_toggle = Some(row.path.clone());
@@ -339,7 +344,21 @@ fn folder_tree(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
                 if r.double_clicked() && row.has_children {
                     out.tree_toggle = Some(row.path.clone());
                 }
-            });
+                //#region 폴더 옆 숫자 — 사진 N장 · 하위 폴더 N
+                if let Some(Some((photos, folders))) = m.tree_counts.get(k) {
+                    let mut t = Vec::new();
+                    if *photos > 0 {
+                        t.push(format!("{photos}장"));
+                    }
+                    if *folders > 0 {
+                        t.push(format!("폴더 {folders}"));
+                    }
+                    if !t.is_empty() {
+                        ui.label(RichText::new(t.join(" · ")).size(11.0).color(Color32::from_gray(130)));
+                    }
+                }
+                //#endregion
+            }));
         }
     });
 }
