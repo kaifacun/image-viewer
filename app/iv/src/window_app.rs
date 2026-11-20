@@ -145,7 +145,7 @@ impl App {
             let _ = p1.send_event(UserEvent::LoaderWake);
         });
         //#region 백그라운드 스캔 — 트리 루트 전부, 현재 장 디코드에 양보
-        let tree = FolderTree::new(FolderTree::default_roots());
+        let tree = FolderTree::with_roots(FolderTree::default_roots());
         let cache_dir = iv_thumbs::default_cache_dir();
         let cache_file = cache_dir.as_ref().map(|d| d.join("scan-v1.tsv"));
         let ignore = cache_dir.into_iter().collect();

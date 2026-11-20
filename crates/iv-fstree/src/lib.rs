@@ -16,11 +16,54 @@ pub struct Row {
     pub expanded: bool,
     /// 하위 폴더가 있을 수 있음 (펼침 삼각형 표시). 나열 전이면 true 로 가정.
     pub has_children: bool,
+    /// 루트 줄이면 그 종류 (구역 제목·아이콘). 하위 줄은 None.
+    pub root: Option<RootKind>,
+}
+
+/// 트리 루트 종류 — Finder 왼쪽 막대처럼 구역과 아이콘을 정한다
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootKind {
+    Home,
+    Desktop,
+    Documents,
+    Downloads,
+    Pictures,
+    Movies,
+    /// iCloud Drive
+    Cloud,
+    /// 디스크·볼륨
+    Disk,
+    /// 그 밖 (시험 루트 등)
+    Folder,
+}
+
+/// 왼쪽 막대 구역
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Section {
+    Favorites,
+    Locations,
+}
+
+impl RootKind {
+    pub fn section(self) -> Section {
+        match self {
+            Self::Cloud | Self::Disk => Section::Locations,
+            _ => Section::Favorites,
+        }
+    }
+}
+
+/// 트리 루트 하나
+#[derive(Clone, Debug)]
+pub struct Root {
+    pub name: String,
+    pub path: PathBuf,
+    pub kind: RootKind,
 }
 
 #[derive(Default)]
 pub struct FolderTree {
-    roots: Vec<(PathBuf, String)>,
+    roots: Vec<(PathBuf, String, RootKind)>,
     expanded: HashSet<PathBuf>,
     /// 경로 → 하위 폴더 (나열 결과 캐시). Err 는 권한 없음 등.
     children: HashMap<PathBuf, Result<Vec<PathBuf>, String>>,
@@ -28,42 +71,64 @@ pub struct FolderTree {
 
 impl FolderTree {
     /// 루트 목록으로 만든다. (이름, 경로)
+    /// 이름·경로만 (종류는 일반 폴더)
     pub fn new(roots: Vec<(String, PathBuf)>) -> Self {
-        Self { roots: roots.into_iter().map(|(n, p)| (p, n)).collect(), ..Default::default() }
+        Self { roots: roots.into_iter().map(|(n, p)| (p, n, RootKind::Folder)).collect(), ..Default::default() }
     }
 
-    /// 기본 루트: `IV_TREE_ROOTS`(구분자 `:`/`;`) 가 있으면 그것만, 없으면 홈·데스크탑·사진·볼륨(맥)/드라이브(윈도).
-    pub fn default_roots() -> Vec<(String, PathBuf)> {
+    pub fn with_roots(roots: Vec<Root>) -> Self {
+        Self { roots: roots.into_iter().map(|r| (r.path, r.name, r.kind)).collect(), ..Default::default() }
+    }
+
+    /// 기본 루트 (Finder 왼쪽 막대처럼): `IV_TREE_ROOTS`(구분자 `:`/`;`) 가 있으면 그것만.
+    /// 즐겨찾기 = 홈·데스크탑·문서·다운로드·사진·동영상, 위치 = iCloud Drive·볼륨(맥)/드라이브(윈도).
+    pub fn default_roots() -> Vec<Root> {
         if let Ok(v) = std::env::var("IV_TREE_ROOTS") {
             let sep = if cfg!(windows) { ';' } else { ':' };
-            return v.split(sep).filter(|s| !s.is_empty()).map(|s| (display_name(Path::new(s)), PathBuf::from(s))).collect();
+            return v.split(sep).filter(|s| !s.is_empty()).map(|s| Root { name: display_name(Path::new(s)), path: PathBuf::from(s), kind: RootKind::Folder }).collect();
         }
         let mut out = Vec::new();
         let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
         if let Some(h) = &home {
-            out.push(("홈".to_string(), h.clone()));
-            for (n, sub) in [("데스크탑", "Desktop"), ("사진", "Pictures"), ("다운로드", "Downloads")] {
+            out.push(Root { name: "홈".to_string(), path: h.clone(), kind: RootKind::Home });
+            let favs = [
+                ("데스크탑", "Desktop", RootKind::Desktop),
+                ("문서", "Documents", RootKind::Documents),
+                ("다운로드", "Downloads", RootKind::Downloads),
+                ("사진", "Pictures", RootKind::Pictures),
+                ("동영상", "Movies", RootKind::Movies),
+            ];
+            for (n, sub, kind) in favs {
                 let p = h.join(sub);
                 if p.is_dir() {
-                    out.push((n.to_string(), p));
+                    out.push(Root { name: n.to_string(), path: p, kind });
                 }
             }
+            // iCloud Drive (켜 둔 경우)
+            let cloud = h.join("Library/Mobile Documents/com~apple~CloudDocs");
+            if cfg!(target_os = "macos") && cloud.is_dir() {
+                out.push(Root { name: "iCloud Drive".to_string(), path: cloud, kind: RootKind::Cloud });
+            }
+        }
+        // 시험: 실제 디스크는 넣지 않는다 (가짜 홈으로 왼쪽 막대만 볼 때)
+        if std::env::var_os("IV_TREE_NO_VOLUMES").is_some() {
+            return out;
         }
         if cfg!(target_os = "macos") {
             if let Ok(rd) = std::fs::read_dir("/Volumes") {
                 let mut vols: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
                 vols.sort();
-                out.extend(vols.into_iter().map(|p| (display_name(&p), p)));
+                out.extend(vols.into_iter().map(|p| Root { name: display_name(&p), path: p, kind: RootKind::Disk }));
             }
         } else if cfg!(windows) {
             for c in b'C'..=b'Z' {
                 let p = PathBuf::from(format!("{}:\\", c as char));
                 if p.is_dir() {
-                    out.push((format!("{}:", c as char), p));
+                    out.push(Root { name: format!("{}:", c as char), path: p, kind: RootKind::Disk });
                 }
             }
         } else {
-            out.push(("/".to_string(), PathBuf::from("/")));
+            out.push(Root { name: "/".to_string(), path: PathBuf::from("/"), kind: RootKind::Disk });
         }
         out
     }
@@ -82,7 +147,7 @@ impl FolderTree {
 
     /// 경로가 보이도록 조상 노드를 모두 펼친다 (폴더를 열었을 때 트리 동기화).
     pub fn expand_to(&mut self, target: &Path) {
-        let Some(root) = self.roots.iter().map(|(r, _)| r).filter(|r| target.starts_with(r)).max_by_key(|r| r.as_os_str().len()).cloned() else {
+        let Some(root) = self.roots.iter().map(|(r, _, _)| r).filter(|r| target.starts_with(r)).max_by_key(|r| r.as_os_str().len()).cloned() else {
             return;
         };
         let mut cur = root;
@@ -115,7 +180,7 @@ impl FolderTree {
 
     /// 루트 경로들 (트리에 보이는 그대로)
     pub fn root_paths(&self) -> Vec<PathBuf> {
-        self.roots.iter().map(|(p, _)| p.clone()).collect()
+        self.roots.iter().map(|(p, _, _)| p.clone()).collect()
     }
 
     /// 펼쳐진 상태대로 평탄화한 줄 목록
@@ -126,9 +191,11 @@ impl FolderTree {
     /// `hide` 가 참인 폴더(와 그 하위)는 빼고 평탄화. 숨긴 것만 남은 폴더는 펼침 삼각형도 없다.
     pub fn visible_rows_where(&self, hide: &dyn Fn(&Path) -> bool) -> Vec<Row> {
         let mut out = Vec::new();
-        for (p, n) in &self.roots {
+        for (p, n, k) in &self.roots {
             if !hide(p) {
+                let at = out.len();
                 self.push_rows(p, n.clone(), 0, hide, &mut out);
+                out[at].root = Some(*k);
             }
         }
         out
@@ -142,7 +209,7 @@ impl FolderTree {
             Some(Ok(v)) => v.iter().any(|c| !hide(c)),
             Some(Err(_)) => false,
         };
-        out.push(Row { path: p.to_path_buf(), name, depth, expanded, has_children });
+        out.push(Row { path: p.to_path_buf(), name, depth, expanded, has_children, root: None });
         if expanded {
             if let Some(Ok(v)) = kids {
                 for c in v.iter().filter(|c| !hide(c)) {

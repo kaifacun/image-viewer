@@ -42,6 +42,17 @@ pub enum Icon {
     Volume,
     /// 스피커 + X
     Mute,
+    /// 집 (홈)
+    Home,
+    /// 모니터 (데스크탑)
+    Desktop,
+    /// 접힌 모서리 종이 (문서)
+    Document,
+    /// 동그라미 + 아래 화살표 (다운로드)
+    Download,
+    Cloud,
+    /// 하드 디스크
+    Disk,
 }
 
 /// 아이콘 버튼. `framed` 면 바탕을 깐다 (도구 막대), 아니면 마우스를 올릴 때만 (떠 있는 막대).
@@ -196,6 +207,42 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
                     p.add(Shape::line(pts, stroke));
                 }
             }
+        }
+        Icon::Home => {
+            p.add(Shape::line(vec![at(0.08, 0.52), at(0.5, 0.12), at(0.92, 0.52)], stroke));
+            p.add(Shape::line(vec![at(0.2, 0.42), at(0.2, 0.88), at(0.8, 0.88), at(0.8, 0.42)], stroke));
+            p.add(Shape::line(vec![at(0.42, 0.88), at(0.42, 0.62), at(0.58, 0.62), at(0.58, 0.88)], stroke));
+        }
+        Icon::Desktop => {
+            p.rect_stroke(Rect::from_min_max(at(0.06, 0.14), at(0.94, 0.7)), CornerRadius::same(2), stroke, StrokeKind::Middle);
+            line(at(0.5, 0.7), at(0.5, 0.86));
+            line(at(0.3, 0.88), at(0.7, 0.88));
+        }
+        Icon::Document => {
+            p.add(Shape::closed_line(vec![at(0.2, 0.06), at(0.6, 0.06), at(0.82, 0.28), at(0.82, 0.94), at(0.2, 0.94)], stroke));
+            p.add(Shape::line(vec![at(0.6, 0.06), at(0.6, 0.28), at(0.82, 0.28)], stroke));
+            line(at(0.34, 0.52), at(0.68, 0.52));
+            line(at(0.34, 0.7), at(0.68, 0.7));
+        }
+        Icon::Download => {
+            p.circle_stroke(c, r.width() * 0.42, stroke);
+            line(at(0.5, 0.26), at(0.5, 0.7));
+            p.add(Shape::line(vec![at(0.32, 0.52), at(0.5, 0.72), at(0.68, 0.52)], stroke));
+        }
+        Icon::Cloud => {
+            let pts: Vec<Pos2> = [
+                (0.22, 0.78), (0.1, 0.68), (0.1, 0.54), (0.2, 0.44), (0.3, 0.42), (0.34, 0.3), (0.46, 0.22), (0.6, 0.24),
+                (0.7, 0.34), (0.74, 0.44), (0.86, 0.48), (0.92, 0.6), (0.88, 0.72), (0.78, 0.78),
+            ]
+            .iter()
+            .map(|&(x, y)| at(x, y))
+            .collect();
+            p.add(Shape::closed_line(pts, stroke));
+        }
+        Icon::Disk => {
+            p.rect_stroke(Rect::from_min_max(at(0.06, 0.3), at(0.94, 0.74)), CornerRadius::same(3), stroke, StrokeKind::Middle);
+            p.circle_filled(at(0.78, 0.52), 1.4, color);
+            line(at(0.18, 0.52), at(0.5, 0.52));
         }
         Icon::Video => {
             p.rect_stroke(Rect::from_min_max(at(0.06, 0.16), at(0.94, 0.84)), CornerRadius::same(2), stroke, StrokeKind::Middle);

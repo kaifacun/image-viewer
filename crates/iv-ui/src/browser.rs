@@ -637,15 +637,29 @@ fn filter_menu(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
 //#endregion
 
 fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.add_space(12.0);
-        ui.label(RichText::new("폴더").size(theme::FONT_CAPTION).strong().color(theme::TEXT_FAINT));
-    });
-    ui.add_space(2.0);
+    ui.add_space(4.0);
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
+        let mut section = None;
         for (k, row) in m.tree.iter().enumerate() {
+            //#region 구역 제목 — Finder 처럼 즐겨찾기 · 위치 (구역이 바뀌는 루트 앞에)
+            if let Some(rk) = row.root {
+                let sec = rk.section();
+                if section != Some(sec) {
+                    section = Some(sec);
+                    ui.add_space(if k == 0 { 4.0 } else { 10.0 });
+                    ui.horizontal(|ui| {
+                        ui.add_space(12.0);
+                        let title = match sec {
+                            iv_fstree::Section::Favorites => "즐겨찾기",
+                            iv_fstree::Section::Locations => "위치",
+                        };
+                        ui.label(RichText::new(title).size(theme::FONT_CAPTION).strong().color(theme::TEXT_FAINT));
+                    });
+                    ui.add_space(2.0);
+                }
+            }
+            //#endregion
             // 줄 id 를 경로로 고정 — 스캔으로 위 줄이 숨겨져 줄이 밀려도 누르던 줄의 클릭이 사라지지 않게
             ui.push_id(&row.path, |ui| {
                 let w = ui.available_width();
@@ -675,7 +689,18 @@ fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, o
                     let pts = if row.expanded { vec![c + Vec2::new(-s, -s * 0.5), c + Vec2::new(0.0, s * 0.6), c + Vec2::new(s, -s * 0.5)] } else { vec![c + Vec2::new(-s * 0.5, -s), c + Vec2::new(s * 0.6, 0.0), c + Vec2::new(-s * 0.5, s)] };
                     p.add(egui::Shape::line(pts, Stroke::new(1.5, if current { Color32::WHITE } else { theme::TEXT_DIM })));
                 }
-                crate::icons::paint(p, Icon::Folder, Rect::from_min_size(Pos2::new(x0 + 18.0, row_r.center().y - 7.0), Vec2::splat(14.0)), if current { Color32::WHITE } else { theme::ACCENT });
+                let icon = match row.root {
+                    Some(iv_fstree::RootKind::Home) => Icon::Home,
+                    Some(iv_fstree::RootKind::Desktop) => Icon::Desktop,
+                    Some(iv_fstree::RootKind::Documents) => Icon::Document,
+                    Some(iv_fstree::RootKind::Downloads) => Icon::Download,
+                    Some(iv_fstree::RootKind::Pictures) => Icon::Photo,
+                    Some(iv_fstree::RootKind::Movies) => Icon::Video,
+                    Some(iv_fstree::RootKind::Cloud) => Icon::Cloud,
+                    Some(iv_fstree::RootKind::Disk) => Icon::Disk,
+                    _ => Icon::Folder,
+                };
+                crate::icons::paint(p, icon, Rect::from_min_size(Pos2::new(x0 + 18.0, row_r.center().y - 7.0), Vec2::splat(14.0)), if current { Color32::WHITE } else { theme::ACCENT });
                 //#region 이름 (말줄임) + 오른쪽 숫자
                 let mut tail = String::new();
                 if let Some((photos, folders)) = counted {

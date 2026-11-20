@@ -60,6 +60,8 @@ struct Ctx {
     tx: Sender<DirEvent>,
     /// 이 접두어 아래 변경은 버린다 (~/Library · 썸네일 캐시 — 잦고 사진 판정과 무관)
     ignore: Vec<Vec<u8>>,
+    /// 버리는 접두어 안이라도 살리는 루트
+    allow: Vec<Vec<u8>>,
 }
 
 extern "C" fn on_events(_s: FSEventStreamRef, info: *mut c_void, n: usize, paths: *mut c_void, flags: *const FSEventStreamEventFlags, _ids: *const FSEventStreamEventId) {
@@ -76,7 +78,9 @@ extern "C" fn on_events(_s: FSEventStreamRef, info: *mut c_void, n: usize, paths
         let bytes = unsafe { CStr::from_ptr(*p) }.to_bytes();
         let bytes = bytes.strip_suffix(b"/").unwrap_or(bytes);
         // 점 폴더 안 변경은 트리·격자에 안 보이므로 버린다
-        if bytes.windows(2).any(|w| w == b"/.") || ctx.ignore.iter().any(|ig| bytes.starts_with(ig)) {
+        // 단, 버리는 곳 안에 따로 감시하는 루트(예: ~/Library 안의 iCloud Drive)는 살린다
+        let ignored = ctx.ignore.iter().any(|ig| bytes.starts_with(ig)) && !ctx.allow.iter().any(|a| bytes.starts_with(a));
+        if bytes.windows(2).any(|w| w == b"/.") || ignored {
             continue;
         }
         let deep = f & (K_FLAG_MUST_SCAN_SUBDIRS | K_FLAG_USER_DROPPED | K_FLAG_KERNEL_DROPPED) != 0;
@@ -92,11 +96,12 @@ pub fn watch(paths: Vec<PathBuf>, ignore: Vec<PathBuf>, tx: Sender<DirEvent>) ->
         return false;
     }
     use std::os::unix::ffi::OsStrExt;
-    let ignore = ignore.iter().map(|p| p.as_os_str().as_bytes().to_vec()).collect();
+    let ignore: Vec<Vec<u8>> = ignore.iter().map(|p| p.as_os_str().as_bytes().to_vec()).collect();
+    let allow: Vec<Vec<u8>> = paths.iter().map(|p| p.as_os_str().as_bytes().to_vec()).filter(|p| ignore.iter().any(|ig| p.starts_with(ig))).collect();
     std::thread::Builder::new()
         .name("iv-scan-watch".into())
         .spawn(move || {
-            let ctx = Box::into_raw(Box::new(Ctx { tx, ignore }));
+            let ctx = Box::into_raw(Box::new(Ctx { tx, ignore, allow }));
             // SAFETY: CF 객체 생성·해제 짝을 맞추고, ctx 는 스트림 수명(=프로세스) 동안 유지한다
             unsafe {
                 let strs: Vec<CFStringRef> = paths
