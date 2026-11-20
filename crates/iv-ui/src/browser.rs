@@ -96,6 +96,12 @@ impl ThumbTextures {
     }
 }
 
+/// 썸네일을 끌 때 실어 나르는 표식 (옮길 대상은 뷰어의 선택)
+#[derive(Clone, Copy, Debug)]
+pub struct DragPhotos {
+    pub count: usize,
+}
+
 /// 프레임 사이에 유지되는 UI 상태 (앱이 소유)
 pub struct BrowserState {
     pub textures: ThumbTextures,
@@ -216,6 +222,18 @@ pub fn draw(ctx: &egui::Context, st: &mut BrowserState, m: &BrowserModel<'_>) ->
         egui::CentralPanel::default().show(ui, |ui| grid(ui, st, m, &mut out));
     });
 
+    //#region 끄는 중 표시 — 커서 옆에 "N장 옮기기"
+    if let Some(p) = egui::DragAndDrop::payload::<DragPhotos>(ctx) {
+        if let Some(pos) = ctx.pointer_latest_pos() {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("iv-drag-ghost")));
+            let text = format!("{}장 옮기기 — 왼쪽 폴더에 놓으세요", p.count);
+            let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), Color32::WHITE);
+            let r = Rect::from_min_size(pos + Vec2::new(14.0, 10.0), galley.size() + Vec2::new(16.0, 8.0));
+            painter.rect_filled(r, CornerRadius::same(6), Color32::from_rgba_unmultiplied(40, 90, 160, 230));
+            painter.galley(r.min + Vec2::new(8.0, 4.0), galley, Color32::WHITE);
+        }
+    }
+    //#endregion
     //#region 이름 입력 대화 상자
     if let Some(d) = &mut st.dialog {
         match dialog::draw(ctx, d) {
@@ -381,6 +399,16 @@ fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, o
                 }
                 let current = m.dir == Some(row.path.as_path());
                 let r = ui.selectable_label(current, row.name.as_str());
+                //#region 사진 놓기 — 끌고 있는 사진을 이 폴더로 옮긴다 (열린 폴더 자신은 제외)
+                if !current {
+                    if r.dnd_hover_payload::<DragPhotos>().is_some() {
+                        ui.painter().rect_stroke(r.rect.expand(2.0), CornerRadius::same(4), Stroke::new(2.0, Color32::from_rgb(90, 160, 240)), StrokeKind::Outside);
+                    }
+                    if r.dnd_release_payload::<DragPhotos>().is_some() {
+                        out.actions.push(Action::MoveMarkedTo(row.path.clone()));
+                    }
+                }
+                //#endregion
                 if r.clicked() && !current {
                     out.actions.push(Action::OpenFolder(row.path.clone()));
                 }
@@ -470,7 +498,16 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
                 let Some(e) = m.entries.get(i) else { break };
                 let min = origin + Vec2::new(left_pad + c as f32 * pitch_x, r as f32 * pitch_y);
                 let cell = Rect::from_min_size(min, Vec2::new(tile, tile + LABEL_H));
-                let resp = ui.interact(cell, ui.scope_id().with(("iv-thumb", e.id.0)), Sense::CLICK);
+                let resp = ui.interact(cell, ui.scope_id().with(("iv-thumb", e.id.0)), Sense::CLICK | Sense::DRAG);
+                //#region 끌기 시작 — 선택에 없는 사진을 끌면 그 사진만 고르고, 선택된 사진을 끌면 선택 전부
+                if resp.drag_started() {
+                    let marked = m.marked.contains(&e.id);
+                    if !marked {
+                        out.actions.push(Action::Select(i));
+                    }
+                    resp.dnd_set_drag_payload(DragPhotos { count: if marked { m.marked.len() } else { 1 } });
+                }
+                //#endregion
                 // 체크 상자는 칸보다 나중에 등록 → 위에 놓여 그 자리 클릭을 가져간다
                 let check = Rect::from_min_size(cell.min + Vec2::splat(6.0), Vec2::splat(CHECK));
                 let check_resp = ui.interact(check, ui.scope_id().with(("iv-check", e.id.0)), Sense::CLICK);

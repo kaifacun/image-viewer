@@ -73,6 +73,8 @@ pub enum Action {
     NewFolder { parent: PathBuf, name: String },
     RenameFolder { path: PathBuf, name: String },
     RenameFile { path: PathBuf, name: String },
+    /// 선택한 사진들을 이 폴더로 옮긴다 (썸네일을 트리에 끌어다 놓기)
+    MoveMarkedTo(PathBuf),
 }
 
 /// 앱이 실행할 파일 작업
@@ -81,6 +83,8 @@ pub enum FileOp {
     NewFolder { parent: PathBuf, name: String },
     RenameFolder { path: PathBuf, name: String },
     RenameFile { path: PathBuf, name: String },
+    /// 선택한 사진들([`ViewerState::trash_targets`] 와 같은 대상)을 옮김 — 결과는 [`ViewerState::on_moved`]
+    MoveTo { dest: PathBuf },
 }
 
 /// 화면 모드
@@ -482,6 +486,12 @@ impl ViewerState {
             Action::NewFolder { parent, name } => self.request(FileOp::NewFolder { parent, name }),
             Action::RenameFolder { path, name } => self.request(FileOp::RenameFolder { path, name }),
             Action::RenameFile { path, name } => self.request(FileOp::RenameFile { path, name }),
+            Action::MoveMarkedTo(dest) => {
+                if self.mode != Mode::Browse || self.trash_targets().is_empty() || self.library.dir() == Some(dest.as_path()) {
+                    return Effects::default();
+                }
+                self.request(FileOp::MoveTo { dest })
+            }
             Action::Trash => {
                 if self.trash_targets().is_empty() {
                     return Effects::default();
@@ -563,6 +573,7 @@ impl ViewerState {
             }
         };
         match op {
+            FileOp::MoveTo { .. } => Effects::redraw(),
             FileOp::NewFolder { parent, .. } => {
                 // 열린 폴더 안이면 하위 폴더 수(상태줄)가 바뀌었다 — 선택은 refresh 가 지킨다
                 if self.library.dir() == Some(parent.as_path()) {
@@ -631,6 +642,15 @@ impl ViewerState {
 
     /// 앱이 휴지통으로 보낸 결과 반영: 성공한 것만 목록에서 빼고, 실패는 오류로 보여준다
     pub fn on_trashed(&mut self, removed: &[PathBuf], failures: &[String], loader: &Loader) -> Effects {
+        self.on_removed(removed, failures, "휴지통으로 못 옮김", loader)
+    }
+
+    /// 다른 폴더로 옮긴 결과 반영 (목록에서 빠지는 것은 휴지통과 같다)
+    pub fn on_moved(&mut self, moved: &[PathBuf], failures: &[String], loader: &Loader) -> Effects {
+        self.on_removed(moved, failures, "옮기지 못함", loader)
+    }
+
+    fn on_removed(&mut self, removed: &[PathBuf], failures: &[String], what: &str, loader: &Loader) -> Effects {
         let ids: HashSet<EntryId> = self.library.entries().iter().filter(|e| e.path().is_some_and(|p| removed.iter().any(|r| r == p))).map(|e| e.id).collect();
         let mut fx = Effects::redraw();
         if self.library.remove_ids(&ids) {
@@ -642,7 +662,7 @@ impl ViewerState {
         }
         // after_navigation 이 오류를 지우므로 그 뒤에 쓴다
         if !failures.is_empty() {
-            self.error = Some(format!("휴지통으로 못 옮김 {}개: {}", failures.len(), failures[0]));
+            self.error = Some(format!("{what} {}개: {}", failures.len(), failures[0]));
         }
         fx
     }

@@ -275,9 +275,14 @@ impl App {
     //#region 파일·폴더 작업 — 디스크 작업은 여기(iv-fsops), 목록 반영은 뷰어, 트리 반영은 여기
     fn file_op(&mut self, el: &ActiveEventLoop) {
         let Some(op) = self.viewer.take_file_op() else { return };
+        if let FileOp::MoveTo { dest } = &op {
+            self.move_to(dest.clone(), el);
+            return;
+        }
         let target = match &op {
             FileOp::NewFolder { parent, .. } => parent.join("x"),
             FileOp::RenameFolder { path, .. } | FileOp::RenameFile { path, .. } => path.clone(),
+            FileOp::MoveTo { dest } => dest.clone(),
         };
         let result = if !self.selftest_allows(&target) {
             Err("시험 루트 밖".to_string())
@@ -285,6 +290,7 @@ impl App {
             match &op {
                 FileOp::NewFolder { parent, name } => iv_fsops::create_folder(parent, name),
                 FileOp::RenameFolder { path, name } | FileOp::RenameFile { path, name } => iv_fsops::rename(path, name),
+                FileOp::MoveTo { .. } => Err("내부 오류".to_string()),
             }
         };
         match (&op, &result) {
@@ -303,9 +309,34 @@ impl App {
             }
             (FileOp::RenameFile { path, .. }, Ok(p)) => log::info!("이름 바꿈: {} → {}", path.display(), p.display()),
             (_, Err(e)) => log::warn!("파일 작업 실패: {e}"),
+            (FileOp::MoveTo { .. }, Ok(_)) => {}
         }
         self.tree_dirty = true;
         let fx = self.viewer.on_file_op(&op, &result, &self.loader);
+        self.apply(fx, el);
+    }
+    /// 선택한 사진들을 폴더로 옮긴다 (같은 이름이 있으면 그 사진은 남기고 오류로 알린다)
+    fn move_to(&mut self, dest: PathBuf, el: &ActiveEventLoop) {
+        let targets = self.viewer.trash_targets();
+        let (mut moved, mut failures) = (Vec::new(), Vec::new());
+        if self.selftest_allows(&dest) {
+            for p in targets {
+                if !self.selftest_allows(&p) {
+                    continue;
+                }
+                match iv_fsops::move_into(&p, &dest) {
+                    Ok(_) => moved.push(p),
+                    Err(e) => {
+                        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        failures.push(format!("{name} ({e})"));
+                    }
+                }
+            }
+        }
+        log::info!("옮기기 → {}: {}개 성공, {}개 실패", dest.display(), moved.len(), failures.len());
+        self.tree.invalidate(&dest);
+        self.tree_dirty = true;
+        let fx = self.viewer.on_moved(&moved, &failures, &self.loader);
         self.apply(fx, el);
     }
     //#endregion
@@ -651,6 +682,23 @@ impl App {
                     }
                     return Some(Instant::now() + Duration::from_millis(16));
                 }
+                //#region 끌어다 놓기 — 누름 → 여러 프레임에 걸쳐 이동 → 놓음 (egui 의 드래그 판정을 그대로 거친다)
+                Step::Drag(x0, y0, x1, y1) => {
+                    let (a, b) = (egui::pos2(x0, y0), egui::pos2(x1, y1));
+                    let btn = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: none };
+                    self.injected.push_back(vec![egui::Event::PointerMoved(a)]);
+                    self.injected.push_back(vec![btn(a, true)]);
+                    for k in 1..=8 {
+                        let t = k as f32 / 8.0;
+                        self.injected.push_back(vec![egui::Event::PointerMoved(a + (b - a) * t)]);
+                    }
+                    self.injected.push_back(vec![egui::Event::PointerMoved(b)]);
+                    self.injected.push_back(vec![btn(b, false)]);
+                    self.injected.push_back(vec![]);
+                    self.request_redraw();
+                    return Some(Instant::now() + Duration::from_millis(16));
+                }
+                //#endregion
                 Step::Type(text) => {
                     self.injected.push_back(vec![egui::Event::Text(text)]);
                     self.injected.push_back(vec![]);

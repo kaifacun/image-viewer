@@ -20,6 +20,8 @@ pub enum Step {
     /// 실입력 주입 (점 좌표) — egui 의 맞음 판정·가려짐까지 거친다
     Click(f32, f32),
     DoubleClick(f32, f32),
+    /// 끌어다 놓기 (점 좌표: 시작 x,y → 끝 x,y)
+    Drag(f32, f32, f32, f32),
     /// 글 입력 (egui Text 이벤트 — 입력 칸에 포커스가 있을 때)
     Type(String),
     /// 수식키를 누른 채 클릭 (cmd, shift)
@@ -94,6 +96,11 @@ fn parse(t: &str) -> Option<Step> {
         }
         "key" => Step::Key(v.to_ascii_lowercase()),
         "type" => Step::Type(v.to_string()),
+        "drag" => {
+            let p: Vec<f32> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+            let [x0, y0, x1, y1] = p[..] else { return None };
+            Step::Drag(x0, y0, x1, y1)
+        }
         "wait-thumbs" => Step::WaitThumbs(v.parse().unwrap_or(5000)),
         "wait-scan" => Step::WaitScan(v.parse().unwrap_or(10000)),
         // 동작 이름만 소문자로 (경로 값은 대소문자를 지킨다)
@@ -135,6 +142,8 @@ fn parse(t: &str) -> Option<Step> {
                 } else if let Some(n) = other.strip_prefix("renamefolder=") {
                     let (p, n) = n.split_once('|')?;
                     Action::RenameFolder { path: PathBuf::from(p), name: n.to_string() }
+                } else if let Some(p) = other.strip_prefix("move=") {
+                    Action::MoveMarkedTo(PathBuf::from(p))
                 } else if let Some(i) = other.strip_prefix("toggle=") {
                     Action::ToggleSelect(i.parse().ok()?)
                 } else if let Some(i) = other.strip_prefix("range=") {
