@@ -59,8 +59,21 @@ const IMAGE_TABLE: &[(&str, &[&str])] = &[
     ),
 ];
 
-/// 비디오 묶음 (AVFoundation 이 재생하는 것)
-const VIDEO_TABLE: &[(&str, &[&str])] = &[("MP4", &["mp4", "m4v"]), ("MOV", &["mov", "qt"]), ("3GP", &["3gp", "3g2"])];
+/// 비디오 묶음 — 앞 셋은 macOS 기본 엔진, 나머지는 추가 코덱 엔진(FFmpeg)이 연다.
+/// (`ts` 는 TypeScript 소스와 겹쳐 넣지 않는다 — 카메라 영상은 mts·m2ts)
+const VIDEO_TABLE: &[(&str, &[&str])] = &[
+    ("MP4", &["mp4", "m4v"]),
+    ("MOV", &["mov", "qt"]),
+    ("3GP", &["3gp", "3g2"]),
+    ("MKV", &["mkv"]),
+    ("WebM", &["webm"]),
+    ("AVI", &["avi"]),
+    ("WMV", &["wmv", "asf"]),
+    ("FLV", &["flv", "f4v"]),
+    ("MPEG", &["mpg", "mpeg", "m2v", "vob"]),
+    ("AVCHD", &["mts", "m2ts"]),
+    ("OGV", &["ogv"]),
+];
 
 /// 비디오 확장자 전부 (디코더가 알든 모르든 — 사진 쪽 "기타" 로 새지 않게 먼저 뺀다)
 pub fn video_extensions() -> impl Iterator<Item = &'static str> {

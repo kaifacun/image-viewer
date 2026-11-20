@@ -88,6 +88,12 @@ impl VideoPlayer {
         unsafe { self.player.play() };
     }
 
+    /// 열렸지만 재생할 수 없음 (코덱 미지원 등) — 앱이 추가 코덱 엔진으로 돌린다
+    pub fn failed(&self) -> bool {
+        let st = unsafe { self.item.status() };
+        st == objc2_av_foundation::AVPlayerItemStatus::Failed
+    }
+
     pub fn pause(&self) {
         unsafe { self.player.pause() };
     }

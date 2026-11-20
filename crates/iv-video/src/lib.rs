@@ -23,6 +23,9 @@ mod other {
         }
         pub fn play(&self) {}
         pub fn pause(&self) {}
+        pub fn failed(&self) -> bool {
+            true
+        }
         pub fn toggle(&self) {}
         pub fn is_playing(&self) -> bool {
             false

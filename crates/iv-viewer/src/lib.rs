@@ -104,6 +104,9 @@ pub enum Action {
     SetKind(MediaKind),
     /// 비디오 재생 조작 (전체 보기에서) — 실제 재생기는 앱이 가진다
     Video(VideoCmd),
+    /// 추가 코덱 엔진 받기에 동의 / 나중에 (앱이 처리 — 뷰어 상태와 무관)
+    InstallCodecs,
+    DismissCodecPrompt,
 }
 
 /// 비디오 재생 명령
@@ -708,6 +711,7 @@ impl ViewerState {
                     None => Effects::redraw(),
                 }
             }
+            Action::InstallCodecs | Action::DismissCodecPrompt => Effects::default(),
             Action::Video(cmd) => {
                 if self.mode != Mode::View || self.kind != MediaKind::Video {
                     return Effects::default();

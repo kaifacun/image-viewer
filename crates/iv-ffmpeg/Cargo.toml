@@ -1,0 +1,10 @@
+[package]
+name = "iv-ffmpeg"
+description = "FFmpeg 별도 프로그램으로 비디오 정보·대표 장면·재생용 변환(MOV 로 옮겨 담기/하드웨어 재인코딩)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-codecpack.workspace = true
+log.workspace = true

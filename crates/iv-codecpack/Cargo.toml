@@ -1,0 +1,9 @@
+[package]
+name = "iv-codecpack"
+description = "추가 코덱 엔진(FFmpeg 별도 프로그램) 찾기·설치 — Homebrew 우선, 없으면 고정 빌드 + SHA-256 검증. 동의를 기억."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+log.workspace = true

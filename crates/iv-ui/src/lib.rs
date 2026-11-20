@@ -207,3 +207,32 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
     }
     actions
 }
+
+/// 추가 코덱 엔진 받기 동의 창 — 답이 있으면 그 Action
+pub fn codec_prompt(ctx: &egui::Context) -> Option<Action> {
+    let mut out = None;
+    egui::Modal::new(egui::Id::unique("iv-codec-prompt")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
+            icons::paint(ui.painter(), icons::Icon::Video, r, theme::ACCENT);
+            ui.label(RichText::new("추가 코덱 엔진이 필요합니다").size(15.0).strong().color(theme::TEXT));
+        });
+        ui.add_space(8.0);
+        ui.label(RichText::new("이 영상은 macOS 기본 엔진으로 열 수 없는 형식입니다 (MKV·WebM·AVI·WMV·FLV·VP9·MPEG-2 등). 무료 코덱 엔진 FFmpeg 를 받아 별도 프로그램으로 사용합니다.").color(theme::TEXT_DIM));
+        ui.add_space(6.0);
+        ui.label(RichText::new("• Homebrew 가 있으면 brew 로 설치, 없으면 검증된 빌드(약 57MB)를 받아 SHA-256 이 맞을 때만 씁니다.\n• 한 번 받으면 이후 필요한 영상은 자동으로 처리합니다.").size(theme::FONT_SMALL).color(theme::TEXT_FAINT));
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new("받기").strong().color(Color32::WHITE)).fill(theme::ACCENT_BG)).clicked() {
+                    out = Some(Action::InstallCodecs);
+                }
+                if ui.button("나중에").clicked() {
+                    out = Some(Action::DismissCodecPrompt);
+                }
+            });
+        });
+    });
+    out
+}

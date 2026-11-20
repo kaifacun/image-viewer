@@ -40,6 +40,8 @@ pub enum UserEvent {
     ThumbWake,
     /// 백그라운드 스캔이 진행됐다 (트리 숨김·상태줄 갱신)
     ScanWake,
+    /// 코덱 엔진 설치·영상 변환이 진행됐다
+    CodecWake,
 }
 
 const BACKGROUND: [u8; 3] = [24, 24, 26];
@@ -110,6 +112,18 @@ struct App {
     video: Option<(u64, iv_video::VideoPlayer)>,
     /// 일시 정지 중에도 이때까지는 프레임을 꺼낸다 (위치 옮기기 직후 화면이 따라오게)
     video_poll_until: Option<Instant>,
+    //#region 추가 코덱 엔진 (FFmpeg) — 설치·변환
+    proxy: EventLoopProxy<UserEvent>,
+    codec_installer: Option<iv_codecpack::Installer>,
+    /// 엔진 받기 동의를 묻는 창
+    codec_prompt: bool,
+    /// 이번 실행에서 "나중에" 를 눌렀다 (다시 묻지 않는다)
+    codec_declined: bool,
+    /// 재생용 변환 작업 (항목 키, 작업)
+    convert: Option<(u64, iv_ffmpeg::Job)>,
+    /// 기본 엔진으로 못 연 항목 — 변환 경로로
+    needs_convert: HashSet<u64>,
+    //#endregion
     /// 자가 시험이 주입할 egui 입력 (프레임마다 한 묶음)
     injected: VecDeque<Vec<egui::Event>>,
     wait_thumbs_until: Option<Instant>,
@@ -139,6 +153,7 @@ impl App {
             let _ = p2.send_event(UserEvent::ScanWake);
         });
         //#endregion
+        let codec_proxy = proxy.clone();
         let thumbs = ThumbService::new(registry, ThumbConfig { gate: Some(gate), ..Default::default() }, move || {
             let _ = proxy.send_event(UserEvent::ThumbWake);
         });
@@ -180,6 +195,12 @@ impl App {
             selftest: SelfTest::from_env(),
             video: None,
             video_poll_until: None,
+            proxy: codec_proxy,
+            codec_installer: None,
+            codec_prompt: false,
+            codec_declined: false,
+            convert: None,
+            needs_convert: HashSet::new(),
             injected: VecDeque::new(),
             wait_thumbs_until: None,
             reconfigures: 0,
@@ -242,34 +263,142 @@ impl App {
 
     //#region 비디오 재생 — 전체 보기·비디오 모드의 현재 항목만 재생기를 가진다
     /// 화면 상태에 재생기를 맞춘다 (멱등 — 이동·모드 전환·목록 복귀를 한 곳에서). 바뀌면 옛 것은 멈추고 버린다.
+    /// 기본 엔진이 못 여는 영상은 변환본(캐시)을 열고, 없으면 변환을 시작하고, 엔진이 없으면 설치를 권한다.
     fn sync_video(&mut self) {
         let want = (self.viewer.mode == Mode::View && self.viewer.kind() == MediaKind::Video)
             .then(|| self.viewer.current().and_then(|e| e.path().map(|p| (e.id.0, p.to_path_buf()))))
             .flatten();
-        if self.video.as_ref().map(|(k, _)| *k) == want.as_ref().map(|(k, _)| *k) {
+        let want_key = want.as_ref().map(|(k, _)| *k);
+        if self.video.as_ref().map(|(k, _)| *k) == want_key && want_key.is_some() {
             return;
         }
         self.video = None;
+        // 다른 영상으로 가면 변환은 멈춘다 (같은 영상이면 이어서)
+        if self.convert.as_ref().map(|(k, _)| *k) != want_key {
+            self.convert = None;
+        }
         let Some((key, path)) = want else { return };
+        //#region 1) 기본 엔진
+        let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+        if iv_decode_video::EXTENSIONS.contains(&ext.as_str()) && !self.needs_convert.contains(&key) {
+            match self.open_player(key, &path) {
+                Ok(()) => return,
+                Err(e) => {
+                    log::info!("기본 엔진으로 못 엶 ({e}) → 추가 코덱 엔진: {}", path.display());
+                    self.needs_convert.insert(key);
+                }
+            }
+        }
+        //#endregion
+        //#region 2) 변환본 캐시 → 3) 변환 시작 → 4) 엔진 설치
+        let Some(cache) = iv_thumbs::default_cache_dir().map(|d| iv_ffmpeg::cache_path(&d.join("video-v1"), &path)) else { return };
+        if cache.is_file() {
+            if let Err(e) = self.open_player(key, &cache) {
+                self.viewer.error = Some(format!("재생할 수 없음: {e}"));
+            }
+            return;
+        }
+        if let Some((_, job)) = &self.convert {
+            match job.state() {
+                iv_ffmpeg::JobState::Done(p) => {
+                    self.convert = None;
+                    if let Err(e) = self.open_player(key, &p) {
+                        self.viewer.error = Some(format!("재생할 수 없음: {e}"));
+                    }
+                }
+                iv_ffmpeg::JobState::Failed(e) => {
+                    self.convert = None;
+                    self.viewer.notice = None;
+                    self.viewer.error = Some(e);
+                }
+                iv_ffmpeg::JobState::Running(p, remux) => {
+                    self.viewer.notice = Some(if remux { format!("재생 준비 중 (옮겨 담기) {:.0}%", p * 100.0) } else { format!("재생 준비 중 (변환 — 처음 한 번만) {:.0}%", p * 100.0) });
+                }
+            }
+            self.request_redraw();
+            return;
+        }
+        match iv_codecpack::find() {
+            Some(t) => {
+                log::info!("변환 시작 ({}): {}", t.source, path.display());
+                let proxy = self.proxy.clone();
+                self.convert = Some((key, iv_ffmpeg::Job::start(t, path, cache, move || {
+                    let _ = proxy.send_event(UserEvent::CodecWake);
+                })));
+                self.viewer.notice = Some("재생 준비 중…".into());
+            }
+            None => self.need_codec_engine(),
+        }
+        self.request_redraw();
+        //#endregion
+    }
+
+    fn open_player(&mut self, key: u64, path: &Path) -> Result<(), String> {
         // 창(물리 픽셀) 긴 변까지만 받아 복사 비용을 줄인다 (4K 영상도 창이 작으면 작게)
         let side = self.gfx.as_ref().map_or(1920, |g| {
             let s = g.window.inner_size();
             s.width.max(s.height)
         });
         // 자가 시험은 소리를 내지 않는다 (사용자 스피커)
-        let muted = self.selftest.is_some();
-        match iv_video::VideoPlayer::open(&path, side.clamp(640, 3840), muted) {
-            Ok(p) => {
-                p.play();
-                log::info!("재생: {}", path.display());
-                self.video = Some((key, p));
-                self.video_poll_until = Some(Instant::now() + Duration::from_secs(2));
-            }
-            Err(e) => {
-                log::warn!("재생 실패 {}: {e}", path.display());
-                let _ = self.viewer.on_clipboard(Err(format!("재생할 수 없음: {e}")));
+        let p = iv_video::VideoPlayer::open(path, side.clamp(640, 3840), self.selftest.is_some())?;
+        p.play();
+        log::info!("재생: {}", path.display());
+        self.video = Some((key, p));
+        self.video_poll_until = Some(Instant::now() + Duration::from_secs(2));
+        self.viewer.notice = None;
+        self.request_redraw();
+        Ok(())
+    }
+
+    /// 엔진이 필요하다: 동의했으면 바로 설치, 아니면 묻는다 (이번 실행에서 거절했으면 안내만)
+    fn need_codec_engine(&mut self) {
+        if self.codec_installer.is_some() {
+            return;
+        }
+        if iv_codecpack::consented() {
+            self.start_codec_install();
+        } else if !self.codec_declined {
+            self.codec_prompt = true;
+        } else {
+            self.viewer.notice = Some("이 영상은 추가 코덱 엔진이 필요합니다 — 보기 메뉴에서 받을 수 있습니다".into());
+        }
+    }
+
+    fn start_codec_install(&mut self) {
+        if self.codec_installer.is_some() || std::env::var_os("IV_CODEC_NO_INSTALL").is_some() {
+            return;
+        }
+        log::info!("코덱 엔진 설치 시작");
+        let proxy = self.proxy.clone();
+        self.codec_installer = Some(iv_codecpack::Installer::start(move || {
+            let _ = proxy.send_event(UserEvent::CodecWake);
+        }));
+    }
+
+    /// 설치·변환 진행 반영
+    fn on_codec_wake(&mut self, el: &ActiveEventLoop) {
+        if let Some(inst) = &self.codec_installer {
+            match inst.status() {
+                iv_codecpack::InstallStatus::Running(msg) => self.viewer.notice = Some(msg),
+                iv_codecpack::InstallStatus::Done(t) => {
+                    log::info!("코덱 엔진 준비됨: {} ({})", t.ffmpeg.display(), t.source);
+                    self.codec_installer = None;
+                    self.viewer.notice = Some(format!("코덱 엔진 준비됨 ({})", t.source));
+                    // 엔진이 없어 실패했던 썸네일을 다시
+                    self.thumbs.forget_failures();
+                    self.thumb_failed.clear();
+                    self.last_requested.clear();
+                }
+                iv_codecpack::InstallStatus::Failed(e) => {
+                    log::warn!("코덱 엔진 설치 실패: {e}");
+                    self.codec_installer = None;
+                    self.viewer.notice = None;
+                    self.viewer.error = Some(format!("코덱 엔진 설치 실패: {e}"));
+                }
             }
         }
+        self.sync_video();
+        let _ = el;
         self.request_redraw();
     }
 
@@ -295,6 +424,14 @@ impl App {
 
     /// 새 프레임이 있으면 화면에. 돌려주는 값 = 다음에 확인할 시각 (재생 중이면 곧, 멈췄으면 None)
     fn pump_video(&mut self) -> Option<Instant> {
+        // 열렸지만 디코드를 못 하는 영상(예: MP4 안의 VP9) → 추가 코덱 엔진 경로로
+        if let Some((key, _)) = self.video.as_ref().filter(|(_, p)| p.failed()) {
+            let key = *key;
+            log::info!("기본 엔진 재생 실패 → 추가 코덱 엔진");
+            self.needs_convert.insert(key);
+            self.video = None;
+            self.sync_video();
+        }
         let (key, p) = self.video.as_mut()?;
         let key = *key;
         if let Some(f) = p.poll_frame() {
@@ -562,6 +699,24 @@ impl App {
         if matches!(a, Action::SetFilter(_) | Action::SetKind(_)) {
             self.tree_dirty = true;
         }
+        //#region 코덱 엔진 받기 창의 답
+        match &a {
+            Action::InstallCodecs => {
+                self.codec_prompt = false;
+                iv_codecpack::set_consent();
+                self.start_codec_install();
+                self.request_redraw();
+                return;
+            }
+            Action::DismissCodecPrompt => {
+                self.codec_prompt = false;
+                self.codec_declined = true;
+                self.request_redraw();
+                return;
+            }
+            _ => {}
+        }
+        //#endregion
         //#region 이름 입력 대화 상자 열기 — UI 상태라 앱이 연다 (브라우저에서만)
         match &a {
             Action::BeginRename if self.viewer.mode == Mode::Browse => {
@@ -706,6 +861,7 @@ impl App {
     /// egui 한 프레임을 돌려 그리기 목록과 버튼 Action 을 만든다
     fn build_ui(&mut self, status: &str) -> (Option<EguiPaint>, Vec<Action>) {
         let mut ui_actions = Vec::new();
+        let mut prompt_actions: Vec<Action> = Vec::new();
         let Some(g) = &mut self.gfx else { return (None, ui_actions) };
         let Some((ctx, state)) = &mut g.egui else { return (None, ui_actions) };
         let mut raw = state.take_egui_input(&g.window);
@@ -734,6 +890,8 @@ impl App {
                 self.tree_rows_at = Some(Instant::now());
                 self.tree_dirty = false;
             }
+            // 파일 존재만 보는 가벼운 확인 (설치 직후 메뉴가 바로 바뀌게)
+            let codec_src = iv_codecpack::find().map(|t| t.source);
             let kind = self.viewer.kind();
             let scan_status = self.scanner.status().text_for(kind_mask(&self.groups, &self.viewer), kind.label(), kind.unit());
             let kind_groups: Vec<iv_core::formats::FormatGroup> = self.groups.iter().filter(|g| g.kind == kind).cloned().collect();
@@ -753,11 +911,18 @@ impl App {
                 cut: &self.cut_paths,
                 groups: &kind_groups,
                 kind,
+                codec_engine: codec_src,
                 filter: self.viewer.filter(),
                 preview_has_frame: self.viewer.shown.as_ref().is_some_and(|s| Some(s.key) == cur),
             };
             let browser = &mut self.browser;
-            ctx.run_pass(raw, |ctx| bout = Some(iv_ui::browser::draw(ctx, browser, &model)))
+            let prompt = self.codec_prompt;
+            ctx.run_pass(raw, |ctx| {
+                bout = Some(iv_ui::browser::draw(ctx, browser, &model));
+                if prompt {
+                    prompt_actions.extend(iv_ui::codec_prompt(ctx));
+                }
+            })
         } else {
             let model = iv_ui::UiModel {
                 status,
@@ -769,7 +934,13 @@ impl App {
                 can_rotate: self.viewer.kind() == MediaKind::Image,
                 video: self.video.as_ref().map(|(_, p)| iv_ui::VideoUi { playing: p.is_playing(), position: p.position(), duration: p.duration(), volume: p.volume(), muted: p.muted() }),
             };
-            ctx.run_pass(raw, |ctx| ui_actions = iv_ui::draw(ctx, &model))
+            let prompt = self.codec_prompt;
+            ctx.run_pass(raw, |ctx| {
+                ui_actions = iv_ui::draw(ctx, &model);
+                if prompt {
+                    prompt_actions.extend(iv_ui::codec_prompt(ctx));
+                }
+            })
         };
         state.handle_platform_output(&g.window, out.platform_output);
         let delay = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay).unwrap_or(Duration::MAX);
@@ -795,6 +966,7 @@ impl App {
             let window = g.window.clone();
             self.after_browser(b.tree_toggle, b.visible, b.preview_rect.map(|r| [r.min.x * ppp, r.min.y * ppp, r.max.x * ppp, r.max.y * ppp]), b.grid_cols, b.grid_rows_visible, &window);
         }
+        ui_actions.extend(prompt_actions);
         (Some(paint), ui_actions)
     }
 
@@ -1128,6 +1300,7 @@ impl ApplicationHandler<UserEvent> for App {
                     }
                 }
             }
+            UserEvent::CodecWake => self.on_codec_wake(el),
             UserEvent::ThumbWake => {
                 // egui 가 없어도 반드시 drain (pending 플래그 리셋)
                 let evs = self.thumbs.drain();
@@ -1140,8 +1313,12 @@ impl ApplicationHandler<UserEvent> for App {
                                 any = true;
                             }
                         }
-                        ThumbEvent::Failed { key, .. } => {
+                        ThumbEvent::Failed { key, error } => {
                             any |= self.thumb_failed.insert(key);
+                            // 엔진이 없어 못 만든 썸네일 — 설치를 권하거나(동의했으면) 바로 설치
+                            if error.contains(iv_decode_video::NEED_ENGINE) && self.viewer.mode == Mode::Browse {
+                                self.need_codec_engine();
+                            }
                         }
                     }
                 }

@@ -16,3 +16,8 @@ ff -f lavfi -i testsrc2=size=3840x2160:rate=30 -t 2 -c:v libx264 -pix_fmt yuv420
 ff -f lavfi -i testsrc2=size=640x360:rate=25 -t 2 -c:v libx264 -pix_fmt yuv420p "$OUT/silent.m4v"
 cp scratch/fixtures/orient1.jpg "$OUT/still.jpg" 2>/dev/null || true
 ls -la "$OUT"
+# FFmpeg 엔진 시험용 (macOS 기본 엔진이 못 여는 것)
+ff -i "$OUT/counter.mp4" -c copy "$OUT/counter.mkv"                                   # H.264 in MKV → 옮겨 담기
+ff -i "$OUT/counter.mp4" -t 3 -c:v libvpx-vp9 -b:v 1M -deadline realtime -cpu-used 8 -c:a libopus "$OUT/counter.webm"   # VP9 → 재인코딩
+ff -i "$OUT/counter.mp4" -t 3 -c:v mpeg4 -q:v 5 -c:a mp3 "$OUT/counter.avi" 2>/dev/null || ff -i "$OUT/counter.mp4" -t 3 -c:v mpeg4 -q:v 5 -an "$OUT/counter.avi"
+ls -la "$OUT"

@@ -190,6 +190,8 @@ pub struct BrowserModel<'a> {
     pub groups: &'a [iv_core::formats::FormatGroup],
     /// 지금 보는 종류 (사진·비디오)
     pub kind: iv_core::formats::MediaKind,
+    /// 추가 코덱 엔진: 찾았으면 어디서 왔는지 ("Homebrew" 등), 없으면 None
+    pub codec_engine: Option<&'a str>,
     /// 지금 걸린 확장자 필터 (None = 전부)
     pub filter: Option<&'a HashSet<&'static str>>,
     /// 미리보기 칸에 렌더러가 실제 프레임을 그리는가 (아니면 썸네일로 대신 채움)
@@ -349,6 +351,20 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
                 out.actions.push(Action::EnterView);
             }
             ui.separator();
+            //#region 추가 코덱 엔진 (FFmpeg) — MKV·WebM·AVI… 재생·썸네일
+            match m.codec_engine {
+                Some(src) => {
+                    ui.add_enabled(false, egui::Button::new(format!("추가 코덱 엔진: {src}")));
+                }
+                None => {
+                    if ui.button("추가 코덱 엔진 받기…").on_hover_text("MKV·WebM·AVI·WMV·FLV 등 재생에 필요 (FFmpeg)").clicked() {
+                        out.actions.push(Action::InstallCodecs);
+                        ui.close();
+                    }
+                }
+            }
+            ui.separator();
+            //#endregion
             if ui.checkbox(&mut st.show_empty_folders, "사진 없는 폴더도 보이기").changed() {
                 out.tree_changed = true;
             }
