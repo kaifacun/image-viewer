@@ -118,8 +118,10 @@ impl App {
         });
         //#region 백그라운드 스캔 — 트리 루트 전부, 현재 장 디코드에 양보
         let tree = FolderTree::new(FolderTree::default_roots());
-        let ignore = iv_thumbs::default_cache_dir().into_iter().collect();
-        let scanner = Scanner::start(ScanConfig { roots: tree.root_paths(), extensions: extensions.clone(), gate: Some(gate.clone()), ignore }, move || {
+        let cache_dir = iv_thumbs::default_cache_dir();
+        let cache_file = cache_dir.as_ref().map(|d| d.join("scan-v1.tsv"));
+        let ignore = cache_dir.into_iter().collect();
+        let scanner = Scanner::start(ScanConfig { roots: tree.root_paths(), extensions: extensions.clone(), gate: Some(gate.clone()), ignore, cache_file }, move || {
             let _ = p2.send_event(UserEvent::ScanWake);
         });
         //#endregion

@@ -13,12 +13,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use iv_core::Gate;
 
+mod persist;
 #[cfg(target_os = "macos")]
 mod watch;
+
+use persist::Cached;
 
 /// 폴더 판정
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +58,10 @@ pub struct ScanStatus {
     pub watching: bool,
     /// 바뀐 폴더를 다시 훑는 중
     pub updating: bool,
+    /// 저장된 결과로 시작해 수정 시각만 확인하는 중
+    pub from_cache: bool,
+    /// 첫 훑기에서 실제로 다시 나열한 폴더 수 (나머지는 수정 시각만 확인)
+    pub relisted: u64,
 }
 
 impl ScanStatus {
@@ -69,6 +76,8 @@ impl ScanStatus {
                 "스캔 완료"
             };
             format!("사진 {}장 · 폴더 {}곳  ·  {tail}", group(self.photos), group(self.photo_dirs))
+        } else if self.from_cache {
+            format!("저장된 결과 확인 중…  폴더 {}개", group(self.dirs))
         } else {
             format!("사진 찾는 중…  폴더 {}개 · 사진 {}장", group(self.dirs), group(self.photos))
         }
@@ -97,6 +106,8 @@ pub struct ScanConfig {
     pub gate: Option<Arc<Gate>>,
     /// 변경 감시에서 버릴 경로 (썸네일 캐시 — 앱 자신의 쓰기가 다시 스캔을 부르지 않게)
     pub ignore: Vec<PathBuf>,
+    /// 스캔 결과 저장 파일 — 다음 실행 때 폴더 수정 시각만 확인한다 (None 이면 매번 전부 나열)
+    pub cache_file: Option<PathBuf>,
 }
 
 struct Shared {
@@ -150,9 +161,25 @@ impl Scanner {
                 false
             };
             //#endregion
+            //#region 저장된 결과 — 불러오자마자 판정을 공개해 트리가 바로 정리된다
+            let mut exts: Vec<&str> = cfg.extensions.iter().copied().collect();
+            exts.sort_unstable();
+            let sig = exts.join(",");
+            let prev = cfg.cache_file.as_deref().map(|f| persist::load(f, &sig)).unwrap_or_default();
+            if !prev.is_empty() {
+                let mut v = s.verdicts.write().unwrap_or_else(|e| e.into_inner());
+                for (d, c) in &prev {
+                    v.insert(d.clone(), DirInfo { verdict: c.verdict, photos: c.photos.min(u32::MAX as u64) as u32, folders: c.folders });
+                }
+                drop(v);
+                s.status.lock().unwrap_or_else(|e| e.into_inner()).from_cache = true;
+                log::info!("스캔: 저장된 결과 {}개 폴더 불러옴", prev.len());
+                (wake)();
+            }
+            //#endregion
             let t0 = Instant::now();
             let unwatched = roots.iter().filter(|r| !watching || r.as_path() == Path::new("/") || !is_local_volume(r)).cloned().collect();
-            let mut w = Walker { shared: s.clone(), roots: roots.clone(), extensions: cfg.extensions, gate: cfg.gate, ignore, wake: Box::new(wake), last_wake: Instant::now(), count: 0, counts: HashMap::new(), unwatched };
+            let mut w = Walker { shared: s.clone(), roots: roots.clone(), extensions: cfg.extensions, gate: cfg.gate, ignore, wake: Box::new(wake), last_wake: Instant::now(), count: 0, counts: HashMap::new(), unwatched, prev, cur: HashMap::new(), cache_file: cfg.cache_file, sig, dirty: false, last_save: Instant::now(), listed: 0 };
             for r in &roots {
                 if w.stopped() {
                     return;
@@ -163,13 +190,19 @@ impl Scanner {
                 }
                 w.walk(r, true);
             }
+            // 저장을 먼저 — '완료'를 본 앱이 곧바로 끝나도 결과가 남게. 이번에 들르지 않은 옛 항목은 버린다.
+            w.prev = HashMap::new();
+            if !w.stopped() {
+                w.save();
+            }
             let st = {
                 let mut st = s.status.lock().unwrap_or_else(|e| e.into_inner());
                 st.done = true;
                 st.watching = watching;
+                st.relisted = w.listed;
                 st.clone()
             };
-            log::info!("스캔 완료: 폴더 {} · 사진 {} · {:.1}s · 감시 {}", st.dirs, st.photos, t0.elapsed().as_secs_f64(), if watching { "켬" } else { "끔" });
+            log::info!("스캔 완료: 폴더 {} (다시 나열 {}) · 사진 {} · {:.1}s · 감시 {}", st.dirs, w.listed, st.photos, t0.elapsed().as_secs_f64(), if watching { "켬" } else { "끔" });
             (w.wake)();
             if watching {
                 w.follow(&rx);
@@ -228,9 +261,20 @@ struct Walker {
     counts: HashMap<PathBuf, u64>,
     /// 감시하지 않는 루트 (/ · 원격 볼륨 · 감시 실패 시 전부) — 여기선 "없음"을 공개하지 않는다
     unwatched: Vec<PathBuf>,
+    /// 지난 실행의 저장 결과 (첫 훑기 동안만)
+    prev: HashMap<PathBuf, Cached>,
+    /// 이번 실행에서 확인한 결과 (저장 대상)
+    cur: HashMap<PathBuf, Cached>,
+    cache_file: Option<PathBuf>,
+    sig: String,
+    dirty: bool,
+    last_save: Instant,
+    /// 실제로 다시 나열한 폴더 수 (수정 시각이 바뀌었거나 처음 보는 폴더)
+    listed: u64,
 }
 
 /// 한 폴더 나열 결과
+#[derive(Clone)]
 struct Listing {
     photos: u64,
     subdirs: Vec<PathBuf>,
@@ -258,7 +302,17 @@ impl Walker {
     //#endregion
 
     //#region 한 폴더 나열 — 사진 세기(격자 규칙), 하위 폴더 모으기(트리 규칙)
-    fn list(&self, dir: &Path) -> Option<Listing> {
+    /// 폴더 수정 시각이 저장된 것과 같으면 저장된 나열을 쓰고, 다르면 다시 나열한다
+    fn list(&mut self, dir: &Path) -> Option<(Listing, SystemTime)> {
+        let mtime = std::fs::metadata(dir).ok()?.modified().ok()?;
+        if let Some(c) = self.cur.get(dir).or_else(|| self.prev.get(dir)).filter(|c| c.mtime == mtime) {
+            return Some((Listing { photos: c.photos, subdirs: c.subdirs.clone(), unknown_child: c.unknown_child, links: c.links.clone() }, mtime));
+        }
+        self.listed += 1;
+        self.read_listing(dir).map(|l| (l, mtime))
+    }
+
+    fn read_listing(&self, dir: &Path) -> Option<Listing> {
         let rd = std::fs::read_dir(dir).ok()?;
         let mut l = Listing { photos: 0, subdirs: Vec::new(), unknown_child: false, links: Vec::new() };
         for e in rd.flatten() {
@@ -293,6 +347,24 @@ impl Walker {
     }
     //#endregion
 
+    //#region 저장
+    fn remember(&mut self, dir: &Path, mtime: SystemTime, l: &Listing, verdict: Verdict, folders: u32) {
+        let c = Cached { mtime, photos: l.photos, unknown_child: l.unknown_child, subdirs: l.subdirs.clone(), links: l.links.clone(), verdict, folders };
+        self.cur.insert(dir.to_path_buf(), c);
+        self.dirty = true;
+    }
+
+    fn save(&mut self) {
+        let Some(f) = self.cache_file.clone() else { return };
+        match persist::save(&f, &self.sig, &self.cur) {
+            Ok(()) => log::debug!("스캔 결과 저장: {}개 폴더", self.cur.len()),
+            Err(e) => log::warn!("스캔 결과 저장 실패: {e}"),
+        }
+        self.dirty = false;
+        self.last_save = Instant::now();
+    }
+    //#endregion
+
     //#region 판정·합계 기록
     fn set_info(&self, dir: &Path, v: Verdict, photos: u64, folders: u32) {
         // 감시하지 않는 곳의 "없음"은 나중에 사진이 생겨도 알 수 없으니 공개하지 않는다 (숨김이 굳지 않게)
@@ -320,6 +392,9 @@ impl Walker {
     /// 사라진 폴더(와 하위)를 잊는다
     fn forget(&mut self, dir: &Path) {
         self.shared.verdicts.write().unwrap_or_else(|e| e.into_inner()).retain(|k, _| !k.starts_with(dir));
+        self.cur.retain(|k, _| !k.starts_with(dir));
+        self.prev.retain(|k, _| !k.starts_with(dir));
+        self.dirty = true;
         let gone: Vec<PathBuf> = self.counts.keys().filter(|k| k.starts_with(dir)).cloned().collect();
         let mut st = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
         for k in gone {
@@ -345,7 +420,7 @@ impl Walker {
             return Verdict::Unknown;
         }
         self.yield_now();
-        let Some(l) = self.list(dir) else {
+        let Some((l, mtime)) = self.list(dir) else {
             self.set_unreadable(dir);
             return Verdict::Unknown;
         };
@@ -364,7 +439,7 @@ impl Walker {
             }
         }
         let photos = l.photos;
-        for sub in l.subdirs {
+        for sub in l.subdirs.clone() {
             let v = if self.is_system(&sub) {
                 Verdict::Empty
             } else if self.skip(&sub, is_root.then_some(dir)) {
@@ -382,6 +457,9 @@ impl Walker {
         //#endregion
         let v = combine(any_photos, unknown || self.stopped());
         self.set_info(dir, v, photos, folders);
+        if !self.stopped() {
+            self.remember(dir, mtime, &l, v, folders);
+        }
         self.maybe_wake();
         v
     }
@@ -389,7 +467,7 @@ impl Walker {
     /// 한 폴더만 다시 판정 (하위 판정은 아는 것을 쓴다). `walk_new` 면 모르는 하위(새 폴더)는 훑고, 사라진 하위는 잊는다.
     fn shallow(&mut self, dir: &Path, walk_new: bool) -> Verdict {
         let is_root = self.roots.iter().any(|r| r == dir);
-        let Some(l) = self.list(dir) else {
+        let Some((l, mtime)) = self.list(dir) else {
             self.set_unreadable(dir);
             return Verdict::Unknown;
         };
@@ -427,6 +505,7 @@ impl Walker {
         }
         let v = combine(any_photos, unknown);
         self.set_info(dir, v, l.photos, folders);
+        self.remember(dir, mtime, &l, v, folders);
         v
     }
 
@@ -437,6 +516,10 @@ impl Walker {
             let first = match rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(e) => e,
                 Err(RecvTimeoutError::Timeout) => {
+                    // 바뀐 게 있으면 10초에 한 번 저장 (끝낼 때도)
+                    if self.dirty && (self.stopped() || self.last_save.elapsed() > Duration::from_secs(10)) {
+                        self.save();
+                    }
                     if self.stopped() {
                         return;
                     }
@@ -597,12 +680,12 @@ fn is_bundle(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e, "app" | "bundle" | "framework" | "photoslibrary" | "pkg"))
 }
 
-//#region 플랫폼 — 낮은 우선순위(맥: QoS background = CPU·디스크 I/O 모두 양보), 로컬 볼륨 판별
+//#region 플랫폼 — 낮은 우선순위(맥: QoS utility — UI 보다 낮음. background 는 I/O 를 너무 조여 stat 하나에 1.4ms, 5만 폴더 78초), 로컬 볼륨 판별
 #[cfg(target_os = "macos")]
 fn set_background_priority() {
     // SAFETY: 현재 스레드의 QoS 만 바꾸는 libc 호출
     unsafe {
-        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
     }
 }
 
@@ -651,8 +734,12 @@ mod tests {
     }
 
     fn run(d: &Path) -> Scanner {
+        run_cached(d, None)
+    }
+
+    fn run_cached(d: &Path, cache_file: Option<PathBuf>) -> Scanner {
         let (tx, rx) = std::sync::mpsc::channel();
-        let s = Scanner::start(ScanConfig { roots: vec![d.to_path_buf()], extensions: HashSet::from(["jpg", "png"]), gate: None, ignore: Vec::new() }, move || {
+        let s = Scanner::start(ScanConfig { roots: vec![d.to_path_buf()], extensions: HashSet::from(["jpg", "png"]), gate: None, ignore: Vec::new(), cache_file }, move || {
             let _ = tx.send(());
         });
         let until = Instant::now() + Duration::from_secs(10);
@@ -730,6 +817,31 @@ mod tests {
         assert_eq!(wait(Verdict::HasPhotos, &c.join("text")), Verdict::HasPhotos);
         assert_eq!(s.verdict(&c.join("text/sub")), Verdict::HasPhotos);
         assert!(!s.take_changed().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 저장 결과로 다시 시작: 판정은 곧바로, 다시 나열은 바뀐 폴더만
+    #[test]
+    fn cache_skips_unchanged_folders() {
+        let d = tree("c");
+        let c = d.canonicalize().unwrap();
+        let file = std::env::temp_dir().join(format!("iv-scan-cache-{}.tsv", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let first = run_cached(&d, Some(file.clone()));
+        let total = first.status().dirs;
+        assert_eq!(first.status().relisted, total);
+        drop(first);
+        // 한 폴더만 바꾼다
+        std::fs::write(c.join("empty/new.jpg"), b"x").unwrap();
+        let second = run_cached(&d, Some(file.clone()));
+        let st = second.status();
+        assert!(st.from_cache);
+        assert_eq!(st.dirs, total);
+        assert_eq!(st.relisted, 1, "바뀐 폴더 하나만 다시 나열");
+        assert_eq!(second.verdict(&c.join("empty")), Verdict::HasPhotos);
+        assert_eq!(second.verdict(&c.join("text")), Verdict::Empty);
+        assert_eq!(st.photos, 3);
+        let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir_all(&d);
     }
 
