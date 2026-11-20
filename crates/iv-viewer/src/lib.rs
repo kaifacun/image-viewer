@@ -1094,7 +1094,13 @@ impl ViewerState {
         self.go(i, loader).with_reveal()
     }
 
+    /// 다음·이전. 전체 보기에선 끝에서 처음으로(처음에서 끝으로) 돌아간다 — 계속 넘겨 보기.
     fn step(&mut self, d: isize, loader: &Loader) -> Effects {
+        let n = self.library.len() as isize;
+        if self.mode == Mode::View && n > 1 {
+            let i = (self.library.index() as isize + d).rem_euclid(n) as usize;
+            return self.go(i, loader);
+        }
         if self.library.step(d) { self.after_navigation(loader) } else { Effects::default() }
     }
 

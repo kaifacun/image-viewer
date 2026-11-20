@@ -317,7 +317,7 @@ impl Scanner {
                 st.relisted = w.listed;
                 st.clone()
             };
-            log::info!("스캔 완료: 폴더 {} (다시 나열 {}) · 사진 {} · {:.1}s · 감시 {}", st.dirs, w.listed, st.photos, t0.elapsed().as_secs_f64(), if watching { "켬" } else { "끔" });
+            log::info!("스캔 완료: 폴더 {} (다시 나열 {}) · 파일 {} · {:.1}s · 감시 {}", st.dirs, w.listed, st.photos, t0.elapsed().as_secs_f64(), if watching { "켬" } else { "끔" });
             (w.wake)();
             if watching {
                 w.follow(&rx);

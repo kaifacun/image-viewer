@@ -387,3 +387,20 @@ fn media_kind_switch() {
     assert_eq!(v.kind(), MediaKind::Video);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// 전체 보기의 다음·이전은 순환 (끝 → 처음, 처음 → 끝), 브라우저 격자 이동은 끝에서 멈춤
+#[test]
+fn view_navigation_wraps() {
+    let (d, l, mut v) = setup("wrap", 3);
+    let _ = v.open(&d, &l);
+    let _ = v.handle(Action::Activate(2), &l);
+    assert_eq!(v.mode, Mode::View);
+    let _ = v.handle(Action::Next, &l);
+    assert_eq!(v.library.index(), 0, "끝에서 다음 → 처음");
+    let _ = v.handle(Action::Prev, &l);
+    assert_eq!(v.library.index(), 2, "처음에서 이전 → 끝");
+    let _ = v.handle(Action::ExitView, &l);
+    let _ = v.handle(Action::GridMove { dx: 1, dy: 0 }, &l);
+    assert_eq!(v.library.index(), 2, "격자는 끝에서 멈춤");
+    let _ = std::fs::remove_dir_all(&d);
+}

@@ -602,6 +602,14 @@ impl App {
             PageCmd::Go(n) => n.min(last),
         };
         if to == pv.page {
+            // 끝 쪽에서 다음 → 다음 파일, 첫 쪽에서 이전 → 이전 파일 (전체 보기는 순환)
+            let a = match cmd {
+                PageCmd::Next => Action::Next,
+                PageCmd::Prev => Action::Prev,
+                _ => return,
+            };
+            let fx = self.viewer.handle(a, &self.loader);
+            self.apply(fx, el);
             return;
         }
         pv.page = to;
