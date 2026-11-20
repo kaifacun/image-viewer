@@ -9,16 +9,18 @@ use std::collections::HashSet;
 pub enum MediaKind {
     Image,
     Video,
+    Document,
 }
 
 impl MediaKind {
     /// 화면 모드 순서 (모드 전환 버튼) — 문서 모드는 여기 덧붙인다
-    pub const ALL: [Self; 2] = [Self::Image, Self::Video];
+    pub const ALL: [Self; 3] = [Self::Image, Self::Video, Self::Document];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Image => "사진",
             Self::Video => "비디오",
+            Self::Document => "문서",
         }
     }
 
@@ -26,7 +28,7 @@ impl MediaKind {
     pub fn unit(self) -> &'static str {
         match self {
             Self::Image => "장",
-            Self::Video => "개",
+            Self::Video | Self::Document => "개",
         }
     }
 }
@@ -75,6 +77,16 @@ const VIDEO_TABLE: &[(&str, &[&str])] = &[
     ("OGV", &["ogv"]),
 ];
 
+/// 문서 묶음 — PDF 는 CoreGraphics, 나머지는 macOS 훑어보기(QuickLook) 미리보기
+const DOC_TABLE: &[(&str, &[&str])] = &[
+    ("PDF", &["pdf"]),
+    ("텍스트", &["txt", "md", "markdown", "log", "csv", "tsv", "json", "xml", "yaml", "yml", "toml", "ini"]),
+    ("코드", &["rs", "py", "js", "ts", "tsx", "jsx", "java", "kt", "swift", "c", "h", "cpp", "hpp", "cs", "go", "rb", "php", "sh", "html", "css", "sql"]),
+    ("워드", &["doc", "docx", "odt", "rtf", "pages"]),
+    ("스프레드시트", &["xls", "xlsx", "ods", "numbers"]),
+    ("프레젠테이션", &["ppt", "pptx", "odp", "key"]),
+];
+
 /// 비디오 확장자 전부 (디코더가 알든 모르든 — 사진 쪽 "기타" 로 새지 않게 먼저 뺀다)
 pub fn video_extensions() -> impl Iterator<Item = &'static str> {
     VIDEO_TABLE.iter().flat_map(|(_, e)| e.iter().copied())
@@ -82,14 +94,17 @@ pub fn video_extensions() -> impl Iterator<Item = &'static str> {
 
 /// 모든 종류의 묶음: 사진 묶음 다음 비디오 묶음. 비디오 확장자는 사진 "기타" 에 들어가지 않는다.
 pub fn media_groups(known: &HashSet<&'static str>) -> Vec<FormatGroup> {
-    let video: HashSet<&'static str> = video_extensions().collect();
-    let images: HashSet<&'static str> = known.iter().copied().filter(|e| !video.contains(e)).collect();
+    // 비디오·문서 확장자는 사진 "기타" 로 새지 않게 먼저 뺀다
+    let other: HashSet<&'static str> = video_extensions().chain(DOC_TABLE.iter().flat_map(|(_, e)| e.iter().copied())).collect();
+    let images: HashSet<&'static str> = known.iter().copied().filter(|e| !other.contains(e)).collect();
     let mut out = image_groups(&images);
-    for (name, exts) in VIDEO_TABLE {
-        let mut exts: Vec<&'static str> = exts.iter().copied().filter(|e| known.contains(e)).collect();
-        exts.sort_unstable();
-        if !exts.is_empty() {
-            out.push(FormatGroup { name, kind: MediaKind::Video, exts });
+    for (table, kind) in [(VIDEO_TABLE, MediaKind::Video), (DOC_TABLE, MediaKind::Document)] {
+        for (name, exts) in table {
+            let mut exts: Vec<&'static str> = exts.iter().copied().filter(|e| known.contains(e)).collect();
+            exts.sort_unstable();
+            if !exts.is_empty() {
+                out.push(FormatGroup { name, kind, exts });
+            }
         }
     }
     out

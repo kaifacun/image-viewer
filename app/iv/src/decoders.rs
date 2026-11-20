@@ -8,6 +8,9 @@ pub fn build_registry() -> DecoderRegistry {
     iv_decode_imageio::register(&mut r);
     // 비디오 포스터(대표 장면) — 썸네일·미리보기. 재생은 iv-video
     iv_decode_video::register(&mut r);
+    // 문서: PDF 쪽 그리기, 그 밖 문서는 macOS 훑어보기 미리보기
+    r.register(iv_decode_pdf::PdfDecoder);
+    iv_decode_quicklook::register(&mut r);
     // 범용 순수 Rust 디코더 (폴백)
     r.register(iv_decode_image::ImageCrateDecoder);
     r

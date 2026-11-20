@@ -514,7 +514,11 @@ fn segmented_kind(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut)
         ui.spacing_mut().item_spacing.x = 2.0;
         for (i, k) in iv_core::formats::MediaKind::ALL.into_iter().enumerate() {
             let on = m.kind == k;
-            let icon = if k == iv_core::formats::MediaKind::Image { Icon::Photo } else { Icon::Video };
+            let icon = match k {
+                iv_core::formats::MediaKind::Image => Icon::Photo,
+                iv_core::formats::MediaKind::Video => Icon::Video,
+                iv_core::formats::MediaKind::Document => Icon::Document,
+            };
             let galley = ui.painter().layout_no_wrap(k.label().to_string(), FontId::proportional(theme::FONT_BODY), Color32::WHITE);
             let size = Vec2::new(galley.size().x + 40.0, 26.0);
             let (r, resp) = ui.allocate_exact_size(size, Sense::click());
@@ -827,7 +831,7 @@ fn inspector(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out
         let ext = e.path().and_then(|p| p.extension()).map(|x| x.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         let group = m.groups.iter().find(|g| g.exts.iter().any(|x| *x == ext)).map_or_else(|| ext.to_uppercase(), |g| g.name.to_string());
         let mut rows: Vec<(&str, String)> = vec![("형식", group)];
-        if let Some([w, h]) = st.textures.full_size(e.id.0) {
+        if let Some([w, h]) = st.textures.full_size(e.id.0).filter(|_| m.kind != iv_core::formats::MediaKind::Document) {
             rows.push(("크기", format!("{w} × {h}")));
             let mp = w as f64 * h as f64 / 1e6;
             if mp >= 0.1 {
@@ -1146,7 +1150,11 @@ fn draw_tile(painter: &egui::Painter, st: &BrowserState, m: &BrowserModel<'_>, e
     job.halign = egui::Align::Center;
     let galley = painter.layout_job(job);
     painter.galley(Pos2::new(cell.center().x, cell.min.y + tile + 1.0), galley, name_color);
-    if let Some([w, h]) = st.textures.full_size(e.id.0) {
+    // 문서의 썸네일 크기는 의미가 없어 빼고 형식만
+    if m.kind == iv_core::formats::MediaKind::Document {
+        let ext = e.path().and_then(|p| p.extension()).map(|x| x.to_string_lossy().to_uppercase()).unwrap_or_default();
+        painter.text(Pos2::new(cell.center().x, cell.min.y + tile + 18.0), Align2::CENTER_TOP, ext, FontId::proportional(theme::FONT_CAPTION), if selected { Color32::from_white_alpha(170) } else { theme::TEXT_FAINT });
+    } else if let Some([w, h]) = st.textures.full_size(e.id.0) {
         painter.text(Pos2::new(cell.center().x, cell.min.y + tile + 18.0), Align2::CENTER_TOP, format!("{w}×{h}"), FontId::proportional(theme::FONT_CAPTION), if selected { Color32::from_white_alpha(170) } else { theme::TEXT_FAINT });
     }
     // 테두리: 선택 = 강조색, 현재 항목(선택 아님) = 옅은 선

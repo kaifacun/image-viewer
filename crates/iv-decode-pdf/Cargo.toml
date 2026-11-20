@@ -1,0 +1,13 @@
+[package]
+name = "iv-decode-pdf"
+description = "PDF 쪽 그리기 (macOS CoreGraphics CGPDFDocument) — 썸네일·전체 보기 쪽 넘기기"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3", features = ["CFURL", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", features = ["CGPDFDocument", "CGPDFPage", "CGContext", "CGBitmapContext", "CGColorSpace", "CGImage"] }

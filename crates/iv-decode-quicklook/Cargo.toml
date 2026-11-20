@@ -1,0 +1,18 @@
+[package]
+name = "iv-decode-quicklook"
+description = "macOS 훑어보기(QuickLook) 썸네일 — 텍스트·코드·워드·엑셀·파워포인트·Pages·Numbers·Keynote 등 문서"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iv-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+iv-decode-imageio.workspace = true
+block2 = "0.6"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-quick-look-thumbnailing = { version = "0.3", features = ["block2", "objc2-core-graphics", "QLThumbnailGenerator", "QLThumbnailGenerationRequest", "QLThumbnailRepresentation"] }

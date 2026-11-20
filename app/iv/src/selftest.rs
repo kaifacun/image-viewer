@@ -129,6 +129,7 @@ fn parse(t: &str) -> Option<Step> {
             "copypath" => Action::CopyPath,
             "kind=image" => Action::SetKind(iv_core::formats::MediaKind::Image),
             "kind=video" => Action::SetKind(iv_core::formats::MediaKind::Video),
+            "kind=document" => Action::SetKind(iv_core::formats::MediaKind::Document),
             other => {
                 if let Some(p) = other.strip_prefix("pan=") {
                     let (x, y) = p.split_once(',')?;
