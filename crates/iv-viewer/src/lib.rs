@@ -675,8 +675,9 @@ impl ViewerState {
                 if let Some(s) = self.shown.as_mut().filter(|s| s.key == old_id.0) {
                     s.key = new_id.0;
                     self.shown_base = s.frame.orientation;
-                    self.turns = 0;
                 }
+                // 화면 프레임이 아직 없어도 회전은 이제 파일 몫 (남기면 새로 읽은 프레임에 두 번 입힌다)
+                self.turns = 0;
                 self.error = None;
                 self.generation += 1;
                 let mut fx = Effects::nav();

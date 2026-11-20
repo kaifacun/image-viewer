@@ -270,6 +270,15 @@ fn rotation_is_view_state_until_saved() {
     assert_ne!(sh.key, old_key, "파일이 바뀌어 새 id");
     assert_eq!(Some(sh.key), v.current().map(|e| e.id.0));
     assert_eq!(sh.frame.orientation, Orientation::Rotate270);
+    // 프레임이 아직 없을 때 저장해도 회전은 파일 몫이 된다 (새 프레임에 두 번 입히지 않게)
+    let _ = v.handle(Action::RotateCw, &l);
+    let _ = v.handle(Action::SaveRotation, &l);
+    let op = v.take_file_op().unwrap();
+    v.shown = None;
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&path, std::fs::read(&path).unwrap()).unwrap();
+    let _ = v.on_file_op(&op, &Ok(path.clone()), &l);
+    assert_eq!(v.turns(), 0);
     // 돌리고 다른 장으로 가면 버린다
     let _ = v.handle(Action::RotateCw, &l);
     let _ = v.handle(Action::Next, &l);

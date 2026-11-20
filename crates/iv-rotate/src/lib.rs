@@ -69,6 +69,11 @@ mod imp {
         if frames != 1 {
             return Err("여러 장이 든 파일은 돌려 저장할 수 없음".into());
         }
+        // Finder 에서 잠근 파일은 건드리지 않는다
+        let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        if std::os::macos::fs::MetadataExt::st_flags(&meta) & (libc::UF_IMMUTABLE | libc::SF_IMMUTABLE) != 0 {
+            return Err("잠긴 파일 (Finder 정보 가져오기에서 잠금 해제)".into());
+        }
         let uti = unsafe { src.r#type() }.ok_or("형식을 알 수 없음")?;
         let tmp = temp_path(path)?;
         let _ = std::fs::remove_file(&tmp); // 지난번에 남은 것
@@ -85,8 +90,8 @@ mod imp {
         result
     }
 
-    /// 수정 시각을 지금으로 — ImageIO 가 원본 시각을 옮겨 오고 JPEG 은 크기도 같아서,
-    /// 그대로 두면 항목 id·썸네일 디스크 캐시(경로·mtime·크기)가 바뀐 줄 모른다.
+    /// 수정 시각을 지금으로 — 방향 태그만 바뀐 JPEG 은 크기가 같아서, 시각까지 같으면
+    /// 항목 id·썸네일 디스크 캐시(경로·mtime·크기)가 바뀐 줄 모른다.
     fn touch(p: &Path) -> Result<(), String> {
         std::fs::File::options()
             .write(true)
@@ -120,15 +125,17 @@ mod imp {
         }
     }
 
-    /// 확장 속성(Finder 태그 등)과 권한을 원본에서 옮긴다
+    /// 확장 속성(Finder 태그 등)·ACL·권한 비트를 원본에서 옮긴다.
+    /// COPYFILE_STAT 은 쓰지 않는다 — 시각과 파일 플래그(잠금 uchg)까지 옮겨 임시 파일을 못 지우게 된다.
     fn copy_metadata(from: &Path, to: &Path) -> Result<(), String> {
         let c = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(|_| "경로에 NUL".to_string());
         let (f, t) = (c(from)?, c(to)?);
-        let flags = libc::COPYFILE_XATTR | libc::COPYFILE_SECURITY;
+        let flags = libc::COPYFILE_XATTR | libc::COPYFILE_ACL;
         if unsafe { libc::copyfile(f.as_ptr(), t.as_ptr(), std::ptr::null_mut(), flags) } != 0 {
             return Err(format!("속성을 옮기지 못함: {}", std::io::Error::last_os_error()));
         }
-        Ok(())
+        let perms = std::fs::metadata(from).map_err(|e| e.to_string())?.permissions();
+        std::fs::set_permissions(to, perms).map_err(|e| format!("권한을 옮기지 못함: {e}"))
     }
 }
 
@@ -194,6 +201,7 @@ mod tests {
                 Err(_) => assert_eq!(std::fs::read(&f).unwrap(), before, "실패하면 원본은 그대로"),
             }
         }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -216,6 +224,23 @@ mod tests {
         // 재압축이면 크기가 크게 달라진다 — 메타데이터만 바뀌면 거의 같다
         let after_len = std::fs::metadata(&p).unwrap().len();
         assert!((after_len as i64 - before_len as i64).abs() < 4096, "{before_len} → {after_len}");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    /// Finder 잠금 파일: 오류, 원본 그대로, 임시 파일 안 남음
+    #[test]
+    fn locked_file_is_refused_without_leftovers() {
+        let Some(p) = fixture("orient1.jpg", "lock") else { return };
+        let before = std::fs::read(&p).unwrap();
+        let flags = |f: &str| assert!(std::process::Command::new("chflags").arg(f).arg(&p).status().unwrap().success());
+        flags("uchg");
+        let r = save_orientation(&p, Orientation::Rotate90);
+        flags("nouchg");
+        assert!(r.is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        let names: Vec<_> = std::fs::read_dir(p.parent().unwrap()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 
     #[test]

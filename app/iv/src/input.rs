@@ -49,9 +49,10 @@ pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode)
             ("1", _, Mode::View) => Some(Action::ActualSize),
             ("i", false, Mode::View) => Some(Action::ToggleInfo),
             // 회전 (전체 보기): R 시계 · L/⇧R 반시계 · ⌘S 저장 (⌘R 은 새로고침)
-            ("r", false, Mode::View) => Some(Action::RotateCw),
-            ("R" | "l" | "L", false, Mode::View) => Some(Action::RotateCcw),
-            ("s", true, Mode::View) => Some(Action::SaveRotation),
+            // 한글 입력 상태면 같은 자리 글자(ㄱ·ㄲ·ㅣ·ㄴ)로 들어온다
+            ("r" | "ㄱ", false, Mode::View) => Some(Action::RotateCw),
+            ("R" | "l" | "L" | "ㄲ" | "ㅣ", false, Mode::View) => Some(Action::RotateCcw),
+            ("s" | "ㄴ", true, Mode::View) => Some(Action::SaveRotation),
             _ => None,
         },
         _ => None,
