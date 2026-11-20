@@ -1,20 +1,43 @@
-# KaiIV — 빠른 이미지 뷰어
+<p align="center"><img src="docs/images/icon-128.png" width="96" alt="KaiIV 아이콘"></p>
 
-실행 파일 `kaiiv` (`cargo run --release -p iv`). 내부 crate 이름은 `iv-*` 그대로.
+<h1 align="center">KaiIV</h1>
 
-Rust + GPU(wgpu) 이미지 뷰어. 맥 우선, 이후 Windows. 설계는 [docs/architecture.md](docs/architecture.md).
+<p align="center"><b>빠르고 가벼운 맥용 이미지 뷰어</b> — 수천 장 폴더도 바로 훑고, 키보드만으로 넘기고, 정리까지.<br>
+<sub>A fast, lightweight image viewer &amp; photo browser for macOS, written in Rust (GPU rendering with CPU fallback).</sub></p>
 
-## 빌드·실행
-```bash
-export PATH="$HOME/.cargo/bin:$PATH"     # rustup 설치 위치
-cargo run --release -p iv -- <폴더>        # 브라우저 화면 (인자 없으면 홈 폴더)
-cargo run --release -p iv -- <파일>        # 그 사진 전체 보기로 시작 (Esc → 그 폴더 브라우저)
-cargo run --release -p iv -- <폴더> --renderer=cpu      # CPU 렌더러 강제
-```
+<p align="center">
+  <a href="https://github.com/kaifacun/image-viewer/releases/latest"><b>⬇︎ 최신판 내려받기 (.dmg)</b></a> ·
+  <a href="CHANGELOG.md">변경 기록</a> ·
+  <a href="LICENSE">MIT 라이선스</a>
+</p>
 
-## 화면
-- **브라우저**: 메뉴·도구모음·경로 줄 / 왼쪽 폴더 트리 + 미리보기 / 썸네일 격자(파일명·해상도) / 상태줄(폴더·파일 수·용량·선택 정보)
-- **전체 보기**: 썸네일 더블클릭·Enter. Esc 또는 "▦ 목록" 으로 돌아오면 마지막에 본 사진이 격자에 보인다.
+<p align="center"><img src="docs/images/demo.gif" width="860" alt="KaiIV 시연 — 격자에서 고르고, 전체 보기로 넘기고, 폴더 트리를 키보드로 이동"></p>
+
+## 이런 앱입니다
+- **빠름** — Rust + GPU(Metal) 렌더링. 다음 장은 미리 읽어 두어 넘기는 순간 바로 뜹니다. 썸네일은 디스크에 캐시해 다시 열면 즉시.
+- **브라우저 + 전체 보기** — 왼쪽 폴더 트리, 가운데 썸네일 격자, 오른쪽 미리보기·정보. 더블클릭·Enter 로 전체 보기, Esc 로 돌아오면 마지막 장이 격자에 보입니다.
+- **키보드로 전부** — Tab 으로 트리 ↔ 격자를 오가며 방향키로 폴더와 사진을 고릅니다.
+- **사진 없는 폴더는 숨김** — 백그라운드 스캔이 하위까지 훑어 사진이 없는 폴더를 트리에서 감춥니다(펼친 폴더부터 먼저). 바뀐 폴더는 FSEvents 로 바로 반영.
+- **정리** — 복사·잘라내기·붙여넣기(Finder 호환), 끌어다 폴더로 옮기기, 이름 바꾸기, 화질 손실 없는 회전 저장, 휴지통(되살리기 가능). 덮어쓰기는 하지 않습니다.
+- **사진·비디오·문서** — HEIC·RAW 를 포함한 사진, 비디오 재생, PDF·마크다운·글 문서 보기. "모든 파일" 보기에선 폴더 안 모든 파일과 폴더 삭제까지.
+- **어디서나 그려짐** — GPU 를 못 쓰면 CPU 렌더러로 같은 화면을 그립니다.
+
+| 브라우저 | 전체 보기 |
+|---|---|
+| ![브라우저 화면](docs/images/browser.jpg) | ![전체 보기 화면](docs/images/viewer.jpg) |
+| **모든 파일 보기** (폴더 삭제 가능) | **폴더 트리 키보드 이동** |
+| ![모든 파일 보기](docs/images/all-files.jpg) | ![폴더 트리 키보드 이동](docs/images/tree-keyboard.jpg) |
+
+<sub>화면의 시연 사진은 AI 로 생성한 이미지입니다.</sub>
+
+## 설치 (macOS 12 이상, 애플 실리콘·인텔 겸용)
+1. [Releases](https://github.com/kaifacun/image-viewer/releases/latest) 에서 `KaiIV-<버전>.dmg` 를 내려받아 엽니다.
+2. `KaiIV` 를 `Applications` 폴더로 끌어다 놓습니다.
+3. **처음 한 번만** — 이 앱은 Apple 공증(notarization)을 받지 않은 오픈 소스 앱이라 맥이 처음 실행을 막습니다.
+   - 앱을 한 번 열어 경고가 뜨면 **시스템 설정 → 개인정보 보호 및 보안** 맨 아래 **"그래도 열기"** 를 누릅니다.
+   - 또는 터미널에서: `xattr -dr com.apple.quarantine /Applications/KaiIV.app`
+
+비디오의 일부 형식(MKV·AVI 등)은 필요할 때 무료 FFmpeg 를 받을지 묻습니다(동의해야만 설치).
 
 ## 조작 — 브라우저
 | 입력 | 동작 |
@@ -32,6 +55,10 @@ cargo run --release -p iv -- <폴더> --renderer=cpu      # CPU 렌더러 강제
 | 오른쪽 클릭·편집 메뉴·도구모음 회전 아이콘 | 선택한 사진 일괄 회전 (원본에 바로 저장, 화질 손실 없음) |
 | ⌘⌫ / Delete, 도구모음 "휴지통" | 선택한 사진을 휴지통으로 (되돌리기 가능 — Finder 휴지통) |
 | ← → ↑ ↓, PageUp/PageDown, Home/End | 격자 이동 |
+| Tab, 창 클릭 | 키보드 초점을 폴더 트리 ↔ 격자로 (초점 있는 창에 파란 테두리) |
+| (트리 초점) ↑ / ↓ · → / ← · Home/End · Enter | 폴더 이동(바로 열림) · 펼치기·하위 / 접기·상위 · 처음/끝 · 격자로 |
+| ⌘1 / ⌘2 / ⌘3 / ⌘4 | 사진 / 비디오 / 문서 / 모든 파일 보기 |
+| (모든 파일 보기) 도구모음 "폴더 삭제", 트리 오른쪽 클릭 | 폴더를 휴지통으로 — 안의 파일 수·용량 확인 창 뒤 |
 | Backspace / ⌘R | 상위 폴더 / 새로고침 |
 | 트리 클릭, ▶ | 폴더 열기, 펼치기 |
 | 경로 줄에 입력 + Enter | 그 폴더로 |
@@ -70,6 +97,18 @@ cargo run --release -p iv -- <폴더> --renderer=cpu      # CPU 렌더러 강제
 ## 렌더러
 `--renderer=auto|gpu|fallback|cpu` — 기본 auto: GPU → 폴백 어댑터(WARP/llvmpipe) → CPU(softbuffer). 실행 중 장치 손실도 다음 단계로 전환하도록 되어 있으나 실제 장치 손실은 모의(`lost`)로만 시험. 현재 렌더러는 상태 표시줄에 표시. CPU 렌더러도 같은 화면(브라우저 포함)을 그린다.
 
+
+## 소스에서 빌드
+[Rust](https://rustup.rs) 가 필요합니다.
+```bash
+cargo run --release -p iv -- <폴더>        # 브라우저 화면 (인자 없으면 홈 폴더)
+cargo run --release -p iv -- <파일>        # 그 사진 전체 보기로 시작 (Esc → 그 폴더 브라우저)
+cargo run --release -p iv -- <폴더> --renderer=cpu      # CPU 렌더러 강제
+tools/make-app.sh                  # dist/KaiIV.app
+tools/make-app.sh --universal --dmg   # 애플 실리콘+인텔 겸용 .app + 배포용 .dmg
+```
+설계는 [docs/architecture.md](docs/architecture.md). 실행 파일 이름은 `kaiiv`, 내부 crate 는 `iv-*`.
+
 ## 시험
 ```bash
 cargo test --workspace
@@ -83,3 +122,6 @@ IV_CACHE_DIR=$PWD/scratch/cache IV_TREE_ROOTS=$PWD/scratch \
 IV_SELFTEST="wait-thumbs:8000;cap:/abs/b1.png;key:down;key:enter;wait:500;cap:/abs/b2.png;key:escape;dblclick:700,250;quit" \
   ./target/release/kaiiv scratch/many
 ```
+
+## 라이선스
+[MIT](LICENSE) © 2026 kaifacun
