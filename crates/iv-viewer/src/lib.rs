@@ -104,9 +104,22 @@ pub enum Action {
     SetKind(MediaKind),
     /// 비디오 재생 조작 (전체 보기에서) — 실제 재생기는 앱이 가진다
     Video(VideoCmd),
+    /// 문서 쪽 넘기기 (전체 보기) — 쪽 상태는 앱이 가진다
+    Page(PageCmd),
     /// 추가 코덱 엔진 받기에 동의 / 나중에 (앱이 처리 — 뷰어 상태와 무관)
     InstallCodecs,
     DismissCodecPrompt,
+}
+
+/// 문서 쪽 명령
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageCmd {
+    Next,
+    Prev,
+    First,
+    Last,
+    /// 이 쪽으로 (0부터)
+    Go(usize),
 }
 
 /// 비디오 재생 명령
@@ -171,6 +184,8 @@ pub enum AppRequest {
     Clipboard(ClipOp),
     /// 비디오 재생기에 명령
     Video(VideoCmd),
+    /// 문서 쪽 넘기기
+    Page(PageCmd),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -530,6 +545,19 @@ impl ViewerState {
         self.show(Shown { key, frame, quality: Quality::Decoded, decode_ms: None });
         Effects::redraw()
     }
+
+    /// 문서 쪽: `new_page` 면 쪽 크기에 맞춰 화면 맞춤 (확대 다시 그리기는 확대·이동을 그대로)
+    pub fn show_page(&mut self, key: u64, frame: Arc<Frame>, new_page: bool) -> Effects {
+        let fx = self.show_live(key, frame);
+        if fx.redraw && new_page {
+            if let Some(size) = self.shown.as_ref().map(|s| s.frame.display_full_size()) {
+                self.viewport.set_image(size);
+                self.viewport.fit();
+                self.preview.set_image(size);
+            }
+        }
+        fx
+    }
     //#endregion
 
     //#region 회전 — 화면에만 입히고, 저장은 앱이 (방향 태그만 바꿔)
@@ -712,6 +740,12 @@ impl ViewerState {
                 }
             }
             Action::InstallCodecs | Action::DismissCodecPrompt => Effects::default(),
+            Action::Page(cmd) => {
+                if self.mode != Mode::View || self.kind != MediaKind::Document {
+                    return Effects::default();
+                }
+                Effects { app: Some(AppRequest::Page(cmd)), ..Default::default() }
+            }
             Action::Video(cmd) => {
                 if self.mode != Mode::View || self.kind != MediaKind::Video {
                     return Effects::default();

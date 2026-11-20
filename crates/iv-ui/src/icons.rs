@@ -20,6 +20,8 @@ pub enum Icon {
     Grid,
     ChevronLeft,
     ChevronRight,
+    ChevronUp,
+    ChevronDown,
     /// 네 모서리 (전체 보기·맞춤)
     Expand,
     /// 동그라미 i (정보)
@@ -141,6 +143,12 @@ pub fn paint(p: &egui::Painter, icon: Icon, r: Rect, color: Color32) {
         }
         Icon::ChevronRight => {
             p.add(Shape::line(vec![at(0.38, 0.18), at(0.68, 0.5), at(0.38, 0.82)], Stroke::new(1.8, color)));
+        }
+        Icon::ChevronUp => {
+            p.add(Shape::line(vec![at(0.18, 0.62), at(0.5, 0.32), at(0.82, 0.62)], Stroke::new(1.8, color)));
+        }
+        Icon::ChevronDown => {
+            p.add(Shape::line(vec![at(0.18, 0.38), at(0.5, 0.68), at(0.82, 0.38)], Stroke::new(1.8, color)));
         }
         Icon::Expand => {
             let k = 0.3;

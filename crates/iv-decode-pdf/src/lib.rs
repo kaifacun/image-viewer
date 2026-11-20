@@ -5,12 +5,15 @@ use std::path::Path;
 
 pub const EXTENSIONS: &[&str] = &["pdf"];
 
+/// "원본 크기"(1:1) = 72dpi 쪽 크기 × 이 값 (288dpi) — 화면에 맞추거나 확대할 때 이 해상도까지 다시 그린다
+pub const DPI_SCALE: f64 = 4.0;
+
 /// 쪽 수 (못 열면 None)
 pub fn page_count(path: &Path) -> Option<usize> {
     imp::page_count(path)
 }
 
-/// `index`(0부터) 쪽을 긴 변 `max_side` 로. 반환 프레임의 `full_size` = 72dpi 기준 쪽 크기(회전 반영).
+/// `index`(0부터) 쪽을 긴 변 `max_side` 로. 반환 프레임의 `full_size` = 쪽 크기 × [`DPI_SCALE`] (회전 반영).
 pub fn render_page(path: &Path, index: usize, max_side: u32) -> std::result::Result<iv_core::Frame, String> {
     imp::render_page(path, index, max_side)
 }
@@ -67,7 +70,7 @@ mod imp {
         drop(ctx);
         //#endregion
         // 불투명 흰 바탕이라 알파는 255 — 그대로 RGBA
-        Ok(Frame::rgba8(w as u32, h as u32, buf, [dw.round() as u32, dh.round() as u32]))
+        Ok(Frame::rgba8(w as u32, h as u32, buf, [(dw * crate::DPI_SCALE).round() as u32, (dh * crate::DPI_SCALE).round() as u32]))
     }
 }
 
@@ -159,7 +162,7 @@ mod tests {
         assert_eq!(page_count(&p), Some(1));
         let f = render_page(&p, 0, 400).unwrap();
         assert_eq!((f.width, f.height), (400, 200));
-        assert_eq!(f.full_size, [200, 100]);
+        assert_eq!(f.full_size, [800, 400]);
         assert_eq!(px(&f, 10, 100)[..3], [0, 0, 0], "왼쪽 검정");
         assert_eq!(px(&f, 390, 100)[..3], [255, 255, 255], "오른쪽 흰색");
         // 90° 회전 쪽: 세로로 서고, 검은 절반이 위로 (시계 방향)

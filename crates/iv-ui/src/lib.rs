@@ -7,7 +7,7 @@ pub mod icons;
 pub mod theme;
 
 use egui::{Align2, Color32, CornerRadius, Frame, Margin, RichText, Vec2};
-use iv_viewer::{Action, VideoCmd};
+use iv_viewer::{Action, PageCmd, VideoCmd};
 
 /// UI 가 그릴 내용 (뷰어 상태에서 앱이 만든다)
 pub struct UiModel<'a> {
@@ -24,6 +24,8 @@ pub struct UiModel<'a> {
     pub can_rotate: bool,
     /// 비디오 재생 중이면 조작 막대 내용
     pub video: Option<VideoUi>,
+    /// PDF 를 보는 중이면 (지금 쪽 0부터, 쪽 수)
+    pub pages: Option<(usize, usize)>,
 }
 
 /// 비디오 조작 막대에 보일 상태
@@ -103,6 +105,9 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
+                    // 떠 있는 막대 위에서도 막대(슬라이더) 홈이 보이게
+                    ui.visuals_mut().extreme_bg_color = theme::PRESSED;
+                    ui.visuals_mut().widgets.inactive.bg_fill = theme::PRESSED;
                     use icons::{Icon, icon_button, icon_toggle};
                     let sep = |ui: &mut egui::Ui| {
                         let (r, _) = ui.allocate_exact_size(Vec2::new(11.0, 18.0), egui::Sense::hover());
@@ -130,13 +135,32 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
                         actions.push(Action::Next);
                     }
                     sep(ui);
+                    //#region 문서 쪽 — 이전·다음 쪽, "3 / 12", 쪽 막대
+                    if let Some((page, pages)) = m.pages {
+                        if icon_button(ui, Icon::ChevronUp, "이전 쪽 (←)", page > 0, false).clicked() {
+                            actions.push(Action::Page(PageCmd::Prev));
+                        }
+                        ui.label(RichText::new(format!("{} / {pages}", page + 1)).size(theme::FONT_SMALL).color(theme::TEXT).monospace());
+                        if icon_button(ui, Icon::ChevronDown, "다음 쪽 (→ · Space)", page + 1 < pages, false).clicked() {
+                            actions.push(Action::Page(PageCmd::Next));
+                        }
+                        if pages > 2 {
+                            let mut p = page + 1;
+                            ui.spacing_mut().slider_width = 160.0;
+                            if ui.add(egui::Slider::new(&mut p, 1..=pages).show_value(false).trailing_fill(true)).on_hover_text("쪽으로 가기 (Home · End)").changed() {
+                                actions.push(Action::Page(PageCmd::Go(p - 1)));
+                            }
+                        }
+                        sep(ui);
+                    }
+                    //#endregion
                     if let Some(v) = m.video {
                         ui.add_space(4.0);
                         ui.label(RichText::new(format_clock(v.position)).size(theme::FONT_SMALL).color(theme::TEXT).monospace());
                         let mut pos = v.position;
                         let dur = v.duration.max(0.01);
                         ui.spacing_mut().slider_width = 280.0;
-                        let r = ui.add(egui::Slider::new(&mut pos, 0.0..=dur).show_value(false)).on_hover_text("위치 (←/→ 5초, ⇧ 1초)");
+                        let r = ui.add(egui::Slider::new(&mut pos, 0.0..=dur).show_value(false).trailing_fill(true)).on_hover_text("위치 (←/→ 5초, ⇧ 1초)");
                         if r.changed() {
                             actions.push(Action::Video(VideoCmd::Seek(pos)));
                         }
@@ -148,7 +172,7 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
                         }
                         let mut vol = if v.muted { 0.0 } else { v.volume };
                         ui.spacing_mut().slider_width = 80.0;
-                        if ui.add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false)).on_hover_text("소리 크기 (↑/↓)").changed() {
+                        if ui.add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false).trailing_fill(true)).on_hover_text("소리 크기 (↑/↓)").changed() {
                             actions.push(Action::Video(VideoCmd::Volume(vol)));
                         }
                         sep(ui);

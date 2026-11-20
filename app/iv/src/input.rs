@@ -1,11 +1,29 @@
 //! 키 → Action 매핑 (단축키 표). 새 단축키는 여기에만 추가한다.
 
-use iv_viewer::{Action, Mode, VideoCmd};
+use iv_core::formats::MediaKind;
+use iv_viewer::{Action, Mode, PageCmd, VideoCmd};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
-pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode, video: bool) -> Option<Action> {
+pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode, kind: MediaKind) -> Option<Action> {
     let cmd = mods.super_key() || mods.control_key();
     let shift = mods.shift_key();
+    let video = kind == MediaKind::Video;
+    //#region 문서 전체 보기: ←/→·Space 쪽 넘기기, Home/End 처음·끝 쪽 (PageUp/PageDown 은 다른 파일)
+    if kind == MediaKind::Document && mode == Mode::View && !cmd {
+        let a = match key {
+            Key::Named(NamedKey::ArrowRight | NamedKey::ArrowDown) => Some(PageCmd::Next),
+            Key::Named(NamedKey::Space) if !shift => Some(PageCmd::Next),
+            Key::Named(NamedKey::Space) => Some(PageCmd::Prev),
+            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => Some(PageCmd::Prev),
+            Key::Named(NamedKey::Home) => Some(PageCmd::First),
+            Key::Named(NamedKey::End) => Some(PageCmd::Last),
+            _ => None,
+        };
+        if let Some(a) = a {
+            return Some(Action::Page(a));
+        }
+    }
+    //#endregion
     //#region 비디오 전체 보기: Space 재생/정지 · ←/→ 5초(⇧ 1초) · ↑/↓ 소리 · M 소리 끄기 · PageUp/PageDown 이전·다음 영상
     if video && mode == Mode::View && !cmd {
         let step = if shift { 1.0 } else { 5.0 };

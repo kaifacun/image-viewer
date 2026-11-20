@@ -16,7 +16,7 @@ use iv_core::formats::MediaKind;
 use iv_scan::{ScanConfig, Scanner, Verdict};
 use iv_thumbs::{ThumbConfig, ThumbEvent, ThumbRequest, ThumbService};
 use iv_ui::browser::{BrowserModel, BrowserState};
-use iv_viewer::{Action, AppRequest, ClipOp, Effects, FileOp, Mode, VideoCmd, ViewerConfig, ViewerState};
+use iv_viewer::{Action, AppRequest, ClipOp, Effects, FileOp, Mode, PageCmd, VideoCmd, ViewerConfig, ViewerState};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -42,7 +42,22 @@ pub enum UserEvent {
     ScanWake,
     /// 코덱 엔진 설치·영상 변환이 진행됐다
     CodecWake,
+    /// 문서 쪽 그리기가 끝났다
+    DocWake,
 }
+
+//#region PDF 전체 보기 — 쪽 상태와 백그라운드 쪽 그리기
+struct PdfView {
+    key: u64,
+    path: PathBuf,
+    pages: usize,
+    page: usize,
+    /// 지금 화면 쪽을 그린 긴 변 (확대하면 더 크게 다시)
+    rendered: u32,
+    /// 그리는 중: (쪽, 긴 변, 결과 받는 곳)
+    job: Option<(usize, u32, std::sync::mpsc::Receiver<Result<iv_core::Frame, String>>)>,
+}
+//#endregion
 
 const BACKGROUND: [u8; 3] = [24, 24, 26];
 
@@ -123,6 +138,8 @@ struct App {
     convert: Option<(u64, iv_ffmpeg::Job)>,
     /// 기본 엔진으로 못 연 항목 — 변환 경로로
     needs_convert: HashSet<u64>,
+    /// 전체 보기 중인 PDF
+    pdf: Option<PdfView>,
     //#endregion
     /// 자가 시험이 주입할 egui 입력 (프레임마다 한 묶음)
     injected: VecDeque<Vec<egui::Event>>,
@@ -203,6 +220,7 @@ impl App {
             codec_declined: false,
             convert: None,
             needs_convert: HashSet::new(),
+            pdf: None,
             injected: VecDeque::new(),
             wait_thumbs_until: None,
             reconfigures: 0,
@@ -252,9 +270,11 @@ impl App {
                 AppRequest::FileOp => self.file_op(el),
                 AppRequest::Clipboard(op) => self.clipboard(op, el),
                 AppRequest::Video(cmd) => self.video_cmd(cmd),
+                AppRequest::Page(cmd) => self.page_cmd(cmd, el),
             }
         }
         self.sync_video();
+        self.sync_pdf();
         if fx.redraw || fx.window_changed || fx.library_changed || fx.reveal {
             self.update_title();
             if let Some(g) = &self.gfx {
@@ -452,6 +472,118 @@ impl App {
         } else {
             self.video_poll_until.filter(|t| *t > now).map(|_| now + Duration::from_millis(16))
         }
+    }
+    //#endregion
+
+    //#region PDF 전체 보기 — 쪽 넘기기·확대 다시 그리기 (그리기는 백그라운드)
+    /// 화면 상태에 PDF 보기를 맞춘다 (멱등)
+    fn sync_pdf(&mut self) {
+        let want = (self.viewer.mode == Mode::View && self.viewer.kind() == MediaKind::Document)
+            .then(|| self.viewer.current().and_then(|e| e.path().filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("pdf"))).map(|p| (e.id.0, p.to_path_buf()))))
+            .flatten();
+        if self.pdf.as_ref().map(|p| p.key) == want.as_ref().map(|(k, _)| *k) {
+            return;
+        }
+        self.pdf = want.map(|(key, path)| {
+            let pages = iv_decode_pdf::page_count(&path).unwrap_or(1).max(1);
+            PdfView { key, path, pages, page: 0, rendered: 0, job: None }
+        });
+        if self.pdf.is_some() {
+            self.render_pdf_page(self.pdf_side(None));
+        }
+    }
+
+    /// 그릴 긴 변: 화면이 필요로 하는 만큼 (창 긴 변 이상, 8192 이하)
+    fn pdf_side(&self, need: Option<u32>) -> u32 {
+        let win = self.gfx.as_ref().map_or(1600, |g| {
+            let s = g.window.inner_size();
+            s.width.max(s.height)
+        });
+        need.unwrap_or(win).max(win).clamp(512, 8192)
+    }
+
+    fn render_pdf_page(&mut self, side: u32) {
+        let Some(pv) = &mut self.pdf else { return };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (path, page) = (pv.path.clone(), pv.page);
+        let proxy = self.proxy.clone();
+        let _ = std::thread::Builder::new().name("iv-pdf-page".into()).spawn(move || {
+            let _ = tx.send(iv_decode_pdf::render_page(&path, page, side));
+            let _ = proxy.send_event(UserEvent::DocWake);
+        });
+        pv.job = Some((page, side, rx));
+    }
+
+    /// 그린 쪽 받기 + 확대로 더 큰 해상도가 필요하면 다시 그리기
+    fn pump_pdf(&mut self) {
+        let Some(pv) = &mut self.pdf else { return };
+        if let Some((page, side, rx)) = &pv.job {
+            match rx.try_recv() {
+                Ok(r) => {
+                    let (page, side) = (*page, *side);
+                    pv.job = None;
+                    // 그리는 동안 쪽을 넘겼으면 버린다
+                    if page == pv.page {
+                        match r {
+                            Ok(f) => {
+                                let new_page = pv.rendered == 0;
+                                pv.rendered = side;
+                                let key = pv.key;
+                                let fx = self.viewer.show_page(key, Arc::new(f), new_page);
+                                if fx.redraw {
+                                    self.request_redraw();
+                                }
+                            }
+                            Err(e) => self.viewer.error = Some(e),
+                        }
+                    } else {
+                        let s = self.pdf_side(None);
+                        self.render_pdf_page(s);
+                    }
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(_) => pv.job = None,
+            }
+        }
+        let Some(pv) = &self.pdf else { return };
+        let need = self.viewer.viewport.needed_max_side();
+        if pv.rendered > 0 && need as f32 > pv.rendered as f32 * 1.2 && pv.rendered < 8192 {
+            let s = self.pdf_side(Some(need));
+            self.render_pdf_page(s);
+        }
+    }
+
+    fn page_cmd(&mut self, cmd: PageCmd, el: &ActiveEventLoop) {
+        let Some(pv) = &mut self.pdf else {
+            // PDF 가 아닌 문서: 쪽 명령은 파일 넘기기로
+            let a = match cmd {
+                PageCmd::Next => Action::Next,
+                PageCmd::Prev => Action::Prev,
+                PageCmd::First => Action::First,
+                PageCmd::Last => Action::Last,
+                PageCmd::Go(_) => return,
+            };
+            let fx = self.viewer.handle(a, &self.loader);
+            self.apply(fx, el);
+            return;
+        };
+        let last = pv.pages - 1;
+        let to = match cmd {
+            PageCmd::Next => (pv.page + 1).min(last),
+            PageCmd::Prev => pv.page.saturating_sub(1),
+            PageCmd::First => 0,
+            PageCmd::Last => last,
+            PageCmd::Go(n) => n.min(last),
+        };
+        if to == pv.page {
+            return;
+        }
+        pv.page = to;
+        pv.rendered = 0;
+        let s = self.pdf_side(None);
+        self.render_pdf_page(s);
+        self.update_title();
     }
     //#endregion
 
@@ -936,6 +1068,7 @@ impl App {
                 can_browse: self.viewer.browse_available,
                 rotated: self.viewer.turns() != 0,
                 can_rotate: self.viewer.kind() == MediaKind::Image,
+                pages: self.pdf.as_ref().map(|p| (p.page, p.pages)),
                 video: self.video.as_ref().map(|(_, p)| iv_ui::VideoUi { playing: p.is_playing(), position: p.position(), duration: p.duration(), volume: p.volume(), muted: p.muted() }),
             };
             let prompt = self.codec_prompt;
@@ -1174,7 +1307,7 @@ impl App {
                     }
                     Some(k) => {
                         let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
-                        if let Some(a) = input::key_action(&k, mods, fullscreen, self.viewer.mode, self.viewer.kind() == MediaKind::Video) {
+                        if let Some(a) = input::key_action(&k, mods, fullscreen, self.viewer.mode, self.viewer.kind()) {
                             self.handle(a, el);
                         }
                     }
@@ -1305,6 +1438,7 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             UserEvent::CodecWake => self.on_codec_wake(el),
+            UserEvent::DocWake => self.pump_pdf(),
             UserEvent::ThumbWake => {
                 // egui 가 없어도 반드시 drain (pending 플래그 리셋)
                 let evs = self.thumbs.drain();
@@ -1384,7 +1518,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { .. } if self.browser.dialog.is_some() => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
-                if let Some(a) = input::key_action(&event.logical_key, self.mods, fullscreen, self.viewer.mode, self.viewer.kind() == MediaKind::Video) {
+                if let Some(a) = input::key_action(&event.logical_key, self.mods, fullscreen, self.viewer.mode, self.viewer.kind()) {
                     // 키를 누르고 있어도 휴지통은 한 번만 (반복 입력이 다음 장을 연달아 지우지 않게)
                     if !(event.repeat && matches!(a, Action::Trash | Action::SaveRotation)) {
                         self.handle(a, el);
@@ -1453,6 +1587,7 @@ impl ApplicationHandler<UserEvent> for App {
         let test_at = if self.selftest.is_some() && self.gfx.is_some() { self.run_selftest(el) } else { None };
         // 3) 비디오 프레임 (재생 중에만 깨어난다 — 멈추면 대기 CPU 0)
         let video_at = self.pump_video();
+        self.pump_pdf();
         // 4) 미래 시각 중 가장 이른 것까지 대기, 없으면 이벤트가 올 때까지
         let now = Instant::now();
         let next = [self.repaint_at, test_at, video_at].into_iter().flatten().filter(|t| *t > now).min();
