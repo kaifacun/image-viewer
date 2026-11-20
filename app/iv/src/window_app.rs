@@ -157,6 +157,8 @@ impl App {
         let thumbs = ThumbService::new(registry, ThumbConfig { gate: Some(gate), ..Default::default() }, move || {
             let _ = proxy.send_event(UserEvent::ThumbWake);
         });
+        // 변환본 캐시 한도 확인 (시작할 때 한 번, 백그라운드)
+        prune_video_cache(None);
         let mut viewer = ViewerState::new([1280.0, 800.0], extensions, ViewerConfig::default());
         viewer.set_kinds(MediaKind::ALL.iter().map(|&k| (k, iv_core::formats::kind_extensions(&groups, k))).collect());
         // 인자 없으면 시작 폴더(IV_START_DIR → 홈)를 브라우저로
@@ -293,6 +295,7 @@ impl App {
         //#region 2) 변환본 캐시 → 3) 변환 시작 → 4) 엔진 설치
         let Some(cache) = iv_thumbs::default_cache_dir().map(|d| iv_ffmpeg::cache_path(&d.join("video-v1"), &path)) else { return };
         if cache.is_file() {
+            iv_ffmpeg::touch(&cache);
             if let Err(e) = self.open_player(key, &cache) {
                 self.viewer.error = Some(format!("재생할 수 없음: {e}"));
             }
@@ -302,6 +305,7 @@ impl App {
             match job.state() {
                 iv_ffmpeg::JobState::Done(p) => {
                     self.convert = None;
+                    prune_video_cache(Some(p.clone()));
                     if let Err(e) = self.open_player(key, &p) {
                         self.viewer.error = Some(format!("재생할 수 없음: {e}"));
                     }
@@ -1494,3 +1498,11 @@ fn tree_mask(groups: &[iv_core::formats::FormatGroup], v: &ViewerState) -> u64 {
     }
 }
 //#endregion
+
+/// 변환본 캐시가 한도(10GB)를 넘으면 오래 안 쓴 것부터 지운다 — 백그라운드 (`keep` = 지금 열 것)
+fn prune_video_cache(keep: Option<PathBuf>) {
+    let Some(dir) = iv_thumbs::default_cache_dir().map(|d| d.join("video-v1")) else { return };
+    let _ = std::thread::Builder::new().name("iv-video-cache-prune".into()).spawn(move || {
+        iv_ffmpeg::prune_cache(&dir, iv_ffmpeg::CACHE_LIMIT, iv_ffmpeg::PRUNE_TO, keep.as_deref());
+    });
+}

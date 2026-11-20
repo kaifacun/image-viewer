@@ -114,6 +114,53 @@ pub fn cache_path(cache_dir: &Path, src: &Path) -> PathBuf {
     cache_dir.join(format!("{:016x}.mov", h.finish()))
 }
 
+//#region 캐시 용량 한도 — 오래 안 쓴 변환본부터 지운다
+/// 변환본 캐시 한도 (넘으면 [`PRUNE_TO`] 까지 줄인다)
+pub const CACHE_LIMIT: u64 = 10 * 1024 * 1024 * 1024;
+pub const PRUNE_TO: u64 = 8 * 1024 * 1024 * 1024;
+
+/// 변환본을 열 때 부른다 — 수정 시각을 지금으로 해 "최근 사용" 표시 (정리 때 마지막에 지워진다)
+pub fn touch(p: &Path) {
+    if let Ok(f) = std::fs::File::options().write(true).open(p) {
+        let _ = f.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// 캐시 폴더가 `limit` 를 넘으면 오래 안 쓴(수정 시각이 오래된) `.mov` 부터 `target` 이하가 될 때까지 지운다.
+/// `keep` 은 지우지 않는다 (지금 재생 중인 것). 돌려주는 값 = 지운 개수.
+pub fn prune_cache(dir: &Path, limit: u64, target: u64, keep: Option<&Path>) -> usize {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = rd
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "mov"))
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((m.modified().ok()?, m.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    if total <= limit {
+        return 0;
+    }
+    files.sort_by_key(|f| f.0);
+    let mut n = 0;
+    for (_, len, p) in files {
+        if total <= target {
+            break;
+        }
+        if keep == Some(p.as_path()) {
+            continue;
+        }
+        if std::fs::remove_file(&p).is_ok() {
+            total -= len;
+            n += 1;
+        }
+    }
+    log::info!("변환본 캐시 정리: {n}개 지움 (남은 {:.1} GB)", total as f64 / 1e9);
+    n
+}
+//#endregion
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum JobState {
     /// 진행률 0~1, 옮겨 담기만 하는가
@@ -256,6 +303,28 @@ mod tests {
         assert!(!pr.remux_only());
         let png = poster_png(&t, &p, pr.duration, 320).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn prune_removes_least_recent_first() {
+        let d = std::env::temp_dir().join(format!("iv-ffmpeg-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let t0 = std::time::SystemTime::now() - std::time::Duration::from_secs(1000);
+        for (i, name) in ["a.mov", "b.mov", "c.mov", "d.mov"].iter().enumerate() {
+            let p = d.join(name);
+            std::fs::write(&p, vec![0u8; 100]).unwrap();
+            let f = std::fs::File::options().write(true).open(&p).unwrap();
+            f.set_modified(t0 + std::time::Duration::from_secs(i as u64 * 10)).unwrap();
+        }
+        // a 를 방금 열었다 → 가장 나중에 지워진다
+        touch(&d.join("a.mov"));
+        // 400 > 한도 250 → 200 까지: b, c 를 지운다 (재생 중인 d 는 지키지 않아도 이미 남는다)
+        assert_eq!(prune_cache(&d, 250, 200, Some(&d.join("b.mov"))), 2);
+        let left: std::collections::BTreeSet<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, ["a.mov", "b.mov"].iter().map(|s| s.to_string()).collect(), "b 는 재생 중이라 지키고 c·d 를 지움");
+        assert_eq!(prune_cache(&d, 250, 200, None), 0, "한도 아래면 그대로");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
