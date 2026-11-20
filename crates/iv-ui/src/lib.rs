@@ -4,6 +4,7 @@
 pub mod browser;
 pub mod dialog;
 pub mod icons;
+pub mod theme;
 
 use egui::{Align2, Color32, CornerRadius, Frame, Margin, RichText, Vec2};
 use iv_viewer::Action;
@@ -25,9 +26,10 @@ pub struct UiModel<'a> {
 
 fn panel_frame() -> Frame {
     Frame::new()
-        .fill(Color32::from_black_alpha(170))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(10, 6))
+        .fill(Color32::from_rgba_unmultiplied(34, 36, 40, 238))
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(12, 10))
 }
 
 /// 한글 등 기본 폰트에 없는 글자를 위해 OS 폰트를 폴백으로 추가한다 (없으면 조용히 건너뜀).
@@ -54,8 +56,16 @@ pub fn install_fonts(ctx: &egui::Context) {
                     egui::epaint::text::InsertFontFamily { family: egui::FontFamily::Monospace, priority: egui::epaint::text::FontPriority::Lowest },
                 ],
             ));
-            return;
+            break;
         }
+    }
+    // 키 기호(⌥ ⌃ 등)는 한글 글꼴에도 없다 — 기호 글꼴을 마지막 대체로 (없으면 건너뜀)
+    if let Ok(bytes) = std::fs::read("/System/Library/Fonts/Apple Symbols.ttf") {
+        ctx.add_font(egui::epaint::text::FontInsert::new(
+            "system-symbols",
+            egui::FontData::from_owned(bytes),
+            vec![egui::epaint::text::InsertFontFamily { family: egui::FontFamily::Proportional, priority: egui::epaint::text::FontPriority::Lowest }],
+        ));
     }
 }
 
@@ -63,46 +73,64 @@ pub fn install_fonts(ctx: &egui::Context) {
 pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
     let mut actions = Vec::new();
 
-    // 아래쪽 상태 표시줄 + 조작 버튼
-    egui::Area::new(egui::Id::unique("status")).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -12.0)).show(ctx, |ui| {
-        panel_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if m.can_browse && ui.add(egui::Button::new(RichText::new("▦ 목록").size(14.0)).frame(false)).on_hover_text("목록으로 (Esc)").clicked() {
-                    actions.push(Action::ExitView);
-                }
-                let mut btn = |ui: &mut egui::Ui, label: &str, tip: &str, a: Action| {
-                    if ui.add_enabled(m.has_image, egui::Button::new(RichText::new(label).size(14.0)).frame(false))
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
-                        actions.push(a);
+    //#region 아래쪽 떠 있는 막대 — 목록 · 이전/다음 · 맞춤/1:1 · 정보 · 회전/저장 | 상태
+    egui::Area::new(egui::Id::unique("iv-view-bar")).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -14.0)).show(ctx, |ui| {
+        Frame::new()
+            .fill(Color32::from_rgba_unmultiplied(34, 36, 40, 238))
+            .stroke(egui::Stroke::new(1.0, theme::BORDER))
+            .corner_radius(CornerRadius::same(12))
+            .inner_margin(Margin::symmetric(8, 5))
+            .shadow(egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(110) })
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    use icons::{Icon, icon_button, icon_toggle};
+                    let sep = |ui: &mut egui::Ui| {
+                        let (r, _) = ui.allocate_exact_size(Vec2::new(11.0, 18.0), egui::Sense::hover());
+                        ui.painter().line_segment([r.center_top(), r.center_bottom()], egui::Stroke::new(1.0, theme::BORDER));
+                    };
+                    if m.can_browse && icon_button(ui, Icon::Grid, "목록으로 (Esc)", true, false).clicked() {
+                        actions.push(Action::ExitView);
                     }
-                };
-                btn(ui, "◀", "이전 (←)", Action::Prev);
-                btn(ui, "▶", "다음 (→)", Action::Next);
-                ui.separator();
-                btn(ui, "맞춤", "화면 맞춤 (0)", Action::Fit);
-                btn(ui, "1:1", "원본 크기 (1)", Action::ActualSize);
-                btn(ui, "정보", "정보 (I)", Action::ToggleInfo);
-                ui.separator();
-                if m.can_rotate && icons::icon_button(ui, icons::Icon::RotateLeft, "왼쪽으로 90° (L)", m.has_image, false).clicked() {
-                    actions.push(Action::RotateCcw);
-                }
-                if m.can_rotate && icons::icon_button(ui, icons::Icon::RotateRight, "오른쪽으로 90° (R)", m.has_image, false).clicked() {
-                    actions.push(Action::RotateCw);
-                }
-                if m.rotated
-                    && ui.add(egui::Button::new(RichText::new("저장").size(14.0).color(Color32::from_rgb(120, 190, 255))).frame(false))
-                        .on_hover_text("돌린 방향을 원본에 저장 (⌘S) — 화질 손실 없음")
-                        .clicked()
-                {
-                    actions.push(Action::SaveRotation);
-                }
-                ui.separator();
-                ui.label(RichText::new(m.status).color(Color32::from_gray(225)).size(13.0));
+                    if m.can_browse {
+                        sep(ui);
+                    }
+                    if icon_button(ui, Icon::ChevronLeft, "이전 (←)", m.has_image, false).clicked() {
+                        actions.push(Action::Prev);
+                    }
+                    if icon_button(ui, Icon::ChevronRight, "다음 (→)", m.has_image, false).clicked() {
+                        actions.push(Action::Next);
+                    }
+                    sep(ui);
+                    if icon_button(ui, Icon::Expand, "화면에 맞춤 (0)", m.has_image, false).clicked() {
+                        actions.push(Action::Fit);
+                    }
+                    if ui.add_enabled(m.has_image, egui::Button::new(RichText::new("1:1").size(theme::FONT_SMALL).strong()).frame(false).min_size(Vec2::new(28.0, 26.0))).on_hover_text("원본 크기 (1)").clicked() {
+                        actions.push(Action::ActualSize);
+                    }
+                    if icon_toggle(ui, Icon::Info, "정보 (I)", m.has_image, false, m.show_info).clicked() {
+                        actions.push(Action::ToggleInfo);
+                    }
+                    if m.can_rotate {
+                        sep(ui);
+                        if icon_button(ui, Icon::RotateLeft, "왼쪽으로 90° (L)", m.has_image, false).clicked() {
+                            actions.push(Action::RotateCcw);
+                        }
+                        if icon_button(ui, Icon::RotateRight, "오른쪽으로 90° (R)", m.has_image, false).clicked() {
+                            actions.push(Action::RotateCw);
+                        }
+                        if m.rotated && icon_toggle(ui, Icon::Save, "돌린 방향을 원본에 저장 (⌘S) — 화질 손실 없음", true, false, true).clicked() {
+                            actions.push(Action::SaveRotation);
+                        }
+                    }
+                    sep(ui);
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(m.status).color(theme::TEXT_DIM).size(theme::FONT_SMALL));
+                    ui.add_space(6.0);
+                });
             });
-        });
     });
+    //#endregion
 
     // 정보 창
     if m.show_info && !m.info.is_empty() {
@@ -110,8 +138,8 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
             panel_frame().show(ui, |ui| {
                 egui::Grid::new("info-grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
                     for (k, v) in m.info {
-                        ui.label(RichText::new(k).color(Color32::from_gray(160)));
-                        ui.label(RichText::new(v).color(Color32::from_gray(235)));
+                        ui.label(RichText::new(k).size(theme::FONT_SMALL).color(theme::TEXT_FAINT));
+                        ui.label(RichText::new(v).size(theme::FONT_SMALL).color(theme::TEXT));
                         ui.end_row();
                     }
                 });

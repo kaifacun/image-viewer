@@ -975,6 +975,7 @@ fn make_egui(window: &Window, r: &dyn Renderer) -> Option<(egui::Context, egui_w
     let ctx = egui::Context::default();
     ctx.set_visuals(egui::Visuals::dark());
     iv_ui::install_fonts(&ctx);
+    iv_ui::theme::install(&ctx);
     let state = egui_winit::State::new(
         ctx.clone(),
         egui::ViewportId::ROOT,

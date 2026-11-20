@@ -12,3 +12,6 @@ iv-core.workspace = true
 iv-library.workspace = true
 iv-fstree.workspace = true
 iv-fsops.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
