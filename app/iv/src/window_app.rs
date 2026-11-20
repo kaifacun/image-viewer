@@ -404,6 +404,8 @@ impl App {
         };
         // UI 를 못 그리는 렌더러(CPU)는 상태 전체를 제목에 싣는다
         let title = if g.renderer.ui_capability() == UiCapability::StatusOnly { self.status() } else { title };
+        // 자가 시험 창은 실제 입력을 무시한다 — 사용자가 진짜 창으로 착각하지 않게 제목에 밝힌다
+        let title = if self.selftest.is_some() { format!("[자가 시험 — 입력 무시] {title}") } else { title };
         g.window.set_title(&title);
     }
 
@@ -510,7 +512,8 @@ impl App {
                 let open_dir = lib.dir();
                 let scanner = &self.scanner;
                 let keep = &self.keep_visible;
-                let hide = |p: &Path| open_dir.is_none_or(|d| !d.starts_with(p)) && !keep.iter().any(|k| k.starts_with(p)) && scanner.verdict(p) == Verdict::Empty;
+                let show_all = self.browser.show_empty_folders;
+                let hide = |p: &Path| !show_all && open_dir.is_none_or(|d| !d.starts_with(p)) && !keep.iter().any(|k| k.starts_with(p)) && scanner.verdict(p) == Verdict::Empty;
                 self.tree_rows = self.tree.visible_rows_where(&hide);
                 self.tree_counts = self.tree_rows.iter().map(|r| scanner.info(&r.path).map(|i| (i.photos, i.folders))).collect();
                 self.tree_rows_at = Some(Instant::now());
@@ -556,6 +559,10 @@ impl App {
         let primitives = ctx.tessellate(out.shapes, ppp);
         let paint = EguiPaint { primitives, textures_delta: out.textures_delta, pixels_per_point: ppp };
         if let Some(b) = bout {
+            if b.tree_changed {
+                self.tree_dirty = true;
+                g.window.request_redraw();
+            }
             ui_actions.extend(b.actions);
             let window = g.window.clone();
             self.after_browser(b.tree_toggle, b.visible, b.preview_rect.map(|r| [r.min.x * ppp, r.min.y * ppp, r.max.x * ppp, r.max.y * ppp]), b.grid_cols, b.grid_rows_visible, &window);
@@ -955,6 +962,8 @@ impl ApplicationHandler<UserEvent> for App {
                 self.apply(fx, el);
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            // 이름 입력 창이 열려 있으면 앱 단축키를 쓰지 않는다 (Tab 으로 입력 칸을 벗어나도 ⌫·Delete 가 새지 않게)
+            WindowEvent::KeyboardInput { .. } if self.browser.dialog.is_some() => {}
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
                 if let Some(a) = input::key_action(&event.logical_key, self.mods, fullscreen, self.viewer.mode) {

@@ -118,11 +118,13 @@ pub struct BrowserState {
     last_visible: Range<usize>,
     /// 열려 있는 이름 입력 대화 상자
     pub dialog: Option<Dialog>,
+    /// 사진 없는 폴더도 트리에 보이기 (옮길 곳으로 쓰려고)
+    pub show_empty_folders: bool,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { textures: ThumbTextures::default(), scroll_to: None, tile: 128.0, path_edit: String::new(), path_edit_for: None, last_view: None, last_visible: 0..0, dialog: None }
+        Self { textures: ThumbTextures::default(), scroll_to: None, tile: 128.0, path_edit: String::new(), path_edit_for: None, last_view: None, last_visible: 0..0, dialog: None, show_empty_folders: false }
     }
 }
 
@@ -173,6 +175,8 @@ pub struct BrowserOut {
     pub actions: Vec<Action>,
     /// 펼침/접기 전환할 트리 노드
     pub tree_toggle: Option<PathBuf>,
+    /// 트리 표시 설정이 바뀜 (다시 만들어야 함)
+    pub tree_changed: bool,
     /// 썸네일을 요청할 항목 범위 (보이는 줄 ±2줄)
     pub visible: Range<usize>,
     /// 미리보기 칸 (점 단위, 화면 좌표)
@@ -301,6 +305,10 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
         ui.menu_button("보기", |ui| {
             if ui.add_enabled(m.selected.is_some(), egui::Button::new("전체 보기  ⏎")).clicked() {
                 out.actions.push(Action::EnterView);
+            }
+            ui.separator();
+            if ui.checkbox(&mut st.show_empty_folders, "사진 없는 폴더도 보이기").changed() {
+                out.tree_changed = true;
             }
             ui.separator();
             for (label, t) in [("썸네일 작게", 96.0), ("썸네일 보통", 128.0), ("썸네일 크게", 176.0)] {

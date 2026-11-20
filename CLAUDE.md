@@ -43,6 +43,7 @@
 - **스캔 판정은 3상태 — 모르면 숨기지 않는다**: 건너뛴 하위(링크·다른 루트·시스템 폴더·읽기 오류)가 있고 사진을 못 찾으면 Unknown. 사진 규칙은 격자(`Library::open`), 폴더 규칙은 트리(`list_subdirs`: 점 폴더·번들 제외)와 같아야 한다. 열린 폴더와 조상은 숨기지 않는다. 시험은 `wait-scan:ms`, 캡처 로그 끝에 스캔 상태.
 - FSEvents 는 `iv-scan/src/watch.rs` 직접 FFI(SDK `FSEvents.h` 기준, 콜백은 채널에 넣기만). `/` 루트는 감시 안 함(시스템 변경 폭주), 썸네일 캐시·~/Library·점 폴더 이벤트는 버린다. 열린 폴더 자동 새로고침은 브라우저 모드에서 목록이 실제로 달라졌을 때만(`refresh_if_changed`) — 전체 보기 확대 상태 보호.
 - 스캔 스레드는 **QoS utility** (background 는 I/O 조임으로 stat 하나 1.4ms → 5만 폴더 78초, utility 는 11초). 결과는 `<캐시>/scan-v1.tsv` 에 저장 — 다음 실행은 폴더 mtime 만 확인하고 바뀐 폴더만 다시 나열. 저장은 '완료' 공개 **전에** (시험이 완료 보고 바로 끝내면 저장이 잘린다). 스캔 중엔 트리가 바뀌므로 **트리 줄은 `push_id(path)` 로 id 고정 + 갱신은 초당 1회·포인터 안 눌렸을 때만**(아니면 클릭이 사라진다).
+- 저장된 나열 재사용은 `dir_mtime_reliable`(statfs apfs/hfs) 루트에서만. 자가 시험 창 제목은 "[자가 시험 — 입력 무시]" — 사용자가 시험 창을 진짜로 알고 클릭할 수 있다(실제로 '클릭 안 됨' 신고가 시험 창 때문이었을 수 있음).
 - 사용자 홈 전체 스캔은 직접 돌리지 않는다(시험은 `IV_TREE_ROOTS=scratch`).
 - 파일 작업(새 폴더·이름 바꾸기·옮기기)은 `iv-fsops` — **덮어쓰기 금지**. 흐름: UI 대화 상자(`iv-ui/dialog.rs`) → `Action::NewFolder/RenameFolder/RenameFile` → 뷰어가 `FileOp` 보관 + `AppRequest::FileOp` → 앱이 실행 → `on_file_op` 로 목록 반영, 트리는 앱이(`renamed`·`invalidate`). 새/이름 바꾼 폴더는 `keep_visible` 로 숨김 예외. 시험: `act:newfolder=|renamefile=|renamefolder=<경로>|<이름>`, `act:move=<폴더>`, `type:글`, `key:f2`, `drag:x0,y0,x1,y1`(egui 드래그 판정 경유).
 - 끌어다 놓기: 타일은 `Sense::CLICK | Sense::DRAG`, 페이로드 `DragPhotos`(표식만 — 대상은 뷰어 선택), 트리 줄이 `dnd_release_payload` 로 `Action::MoveMarkedTo`. 자가 시험에서 shift-click 직후 바로 dblclick 하면 egui 가 세 번 클릭으로 본다(wait 넣기).

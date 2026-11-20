@@ -67,6 +67,14 @@ impl Dialog {
     }
 
     fn action(&self, name: String) -> Action {
+        // 사진 이름에서 확장자를 지웠으면 원래 확장자를 붙인다 (없으면 격자에서 사라진다)
+        let name = match &self.kind {
+            DialogKind::RenameFile { path } => match path.extension().and_then(|e| e.to_str()) {
+                Some(ext) if Path::new(&name).extension().is_none() => format!("{name}.{ext}"),
+                _ => name,
+            },
+            _ => name,
+        };
         match &self.kind {
             DialogKind::NewFolder { parent } => Action::NewFolder { parent: parent.clone(), name },
             DialogKind::RenameFolder { path } => Action::RenameFolder { path: path.clone(), name },
@@ -130,4 +138,21 @@ pub fn draw(ctx: &egui::Context, d: &mut Dialog) -> DialogResult {
         result = DialogResult::Cancel;
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_keeps_extension_when_dropped() {
+        let d = Dialog::rename_file(PathBuf::from("/x/p00.JPG"));
+        assert_eq!(d.action("바다".into()), Action::RenameFile { path: PathBuf::from("/x/p00.JPG"), name: "바다.JPG".into() });
+        assert_eq!(d.action("바다.png".into()), Action::RenameFile { path: PathBuf::from("/x/p00.JPG"), name: "바다.png".into() });
+        // 폴더는 그대로
+        let f = Dialog::rename_folder(PathBuf::from("/x/여행"));
+        assert_eq!(f.action("2026".into()), Action::RenameFolder { path: PathBuf::from("/x/여행"), name: "2026".into() });
+        // 처음 선택은 확장자 앞까지
+        assert_eq!(d.initial_selection(), (0, 3));
+    }
 }

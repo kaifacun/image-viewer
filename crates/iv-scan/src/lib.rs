@@ -179,7 +179,7 @@ impl Scanner {
             //#endregion
             let t0 = Instant::now();
             let unwatched = roots.iter().filter(|r| !watching || r.as_path() == Path::new("/") || !is_local_volume(r)).cloned().collect();
-            let mut w = Walker { shared: s.clone(), roots: roots.clone(), extensions: cfg.extensions, gate: cfg.gate, ignore, wake: Box::new(wake), last_wake: Instant::now(), count: 0, counts: HashMap::new(), unwatched, prev, cur: HashMap::new(), cache_file: cfg.cache_file, sig, dirty: false, last_save: Instant::now(), listed: 0 };
+            let mut w = Walker { shared: s.clone(), roots: roots.clone(), extensions: cfg.extensions, gate: cfg.gate, ignore, wake: Box::new(wake), last_wake: Instant::now(), count: 0, counts: HashMap::new(), unwatched, mtime_trusted: roots.iter().filter(|r| dir_mtime_reliable(r)).cloned().collect(), prev, cur: HashMap::new(), cache_file: cfg.cache_file, sig, dirty: false, last_save: Instant::now(), listed: 0 };
             for r in &roots {
                 if w.stopped() {
                     return;
@@ -271,6 +271,8 @@ struct Walker {
     last_save: Instant,
     /// 실제로 다시 나열한 폴더 수 (수정 시각이 바뀌었거나 처음 보는 폴더)
     listed: u64,
+    /// 폴더 수정 시각을 믿을 수 있는 루트 (APFS·HFS+). FAT/exFAT 카드 등은 늘 다시 나열한다.
+    mtime_trusted: Vec<PathBuf>,
 }
 
 /// 한 폴더 나열 결과
@@ -305,7 +307,8 @@ impl Walker {
     /// 폴더 수정 시각이 저장된 것과 같으면 저장된 나열을 쓰고, 다르면 다시 나열한다
     fn list(&mut self, dir: &Path) -> Option<(Listing, SystemTime)> {
         let mtime = std::fs::metadata(dir).ok()?.modified().ok()?;
-        if let Some(c) = self.cur.get(dir).or_else(|| self.prev.get(dir)).filter(|c| c.mtime == mtime) {
+        let trusted = self.mtime_trusted.iter().any(|r| dir.starts_with(r));
+        if let Some(c) = self.cur.get(dir).or_else(|| self.prev.get(dir)).filter(|c| trusted && c.mtime == mtime) {
             return Some((Listing { photos: c.photos, subdirs: c.subdirs.clone(), unknown_child: c.unknown_child, links: c.links.clone() }, mtime));
         }
         self.listed += 1;
@@ -366,11 +369,13 @@ impl Walker {
     //#endregion
 
     //#region 판정·합계 기록
-    fn set_info(&self, dir: &Path, v: Verdict, photos: u64, folders: u32) {
+    /// 판정 공개. 돌려주는 값 = 실제로 공개한 판정 (저장도 이것으로 — 다음 실행에 그대로 공개되므로)
+    fn set_info(&self, dir: &Path, v: Verdict, photos: u64, folders: u32) -> Verdict {
         // 감시하지 않는 곳의 "없음"은 나중에 사진이 생겨도 알 수 없으니 공개하지 않는다 (숨김이 굳지 않게)
         let verdict = if v == Verdict::Empty && !self.watched(dir) { Verdict::Unknown } else { v };
         let info = DirInfo { verdict, photos: photos.min(u32::MAX as u64) as u32, folders };
         self.shared.verdicts.write().unwrap_or_else(|e| e.into_inner()).insert(dir.to_path_buf(), info);
+        verdict
     }
 
     /// 읽지 못한 폴더 — 숫자 없이 모름으로
@@ -456,9 +461,9 @@ impl Walker {
         }
         //#endregion
         let v = combine(any_photos, unknown || self.stopped());
-        self.set_info(dir, v, photos, folders);
+        let published = self.set_info(dir, v, photos, folders);
         if !self.stopped() {
-            self.remember(dir, mtime, &l, v, folders);
+            self.remember(dir, mtime, &l, published, folders);
         }
         self.maybe_wake();
         v
@@ -504,8 +509,8 @@ impl Walker {
             }
         }
         let v = combine(any_photos, unknown);
-        self.set_info(dir, v, l.photos, folders);
-        self.remember(dir, mtime, &l, v, folders);
+        let published = self.set_info(dir, v, l.photos, folders);
+        self.remember(dir, mtime, &l, published, folders);
         v
     }
 
@@ -706,6 +711,27 @@ fn is_local_volume(p: &Path) -> bool {
 #[cfg(not(target_os = "macos"))]
 fn is_local_volume(_p: &Path) -> bool {
     true
+}
+
+/// 하위 항목이 바뀌면 폴더 수정 시각이 반드시 바뀌는 파일 시스템인가 (저장된 나열을 믿어도 되는가)
+#[cfg(target_os = "macos")]
+fn dir_mtime_reliable(p: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(p.as_os_str().as_bytes()) else { return false };
+    // SAFETY: statfs 는 c 경로를 읽고 buf 를 채운다
+    let name = unsafe {
+        let mut buf: libc::statfs = std::mem::zeroed();
+        if libc::statfs(c.as_ptr(), &mut buf) != 0 {
+            return false;
+        }
+        std::ffi::CStr::from_ptr(buf.f_fstypename.as_ptr()).to_string_lossy().into_owned()
+    };
+    matches!(name.as_str(), "apfs" | "hfs")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn dir_mtime_reliable(_p: &Path) -> bool {
+    false
 }
 //#endregion
 
