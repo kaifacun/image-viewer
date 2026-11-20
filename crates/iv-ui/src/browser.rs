@@ -102,6 +102,17 @@ pub struct DragPhotos {
     pub count: usize,
 }
 
+/// 빈 공간에서 끌어 그리는 선택 상자 (내용 좌표 — 스크롤해도 시작점이 따라간다)
+#[derive(Clone, Debug)]
+struct Marquee {
+    start: Vec2,
+    /// ⌘/⇧ 를 누르고 시작 — 기존 선택에 더한다
+    keep: bool,
+    /// 마지막으로 보낸 항목 (바뀔 때만 다시 보낸다)
+    last: Vec<usize>,
+    sent_begin: bool,
+}
+
 /// 프레임 사이에 유지되는 UI 상태 (앱이 소유)
 pub struct BrowserState {
     pub textures: ThumbTextures,
@@ -120,11 +131,12 @@ pub struct BrowserState {
     pub dialog: Option<Dialog>,
     /// 사진 없는 폴더도 트리에 보이기 (옮길 곳으로 쓰려고)
     pub show_empty_folders: bool,
+    marquee: Option<Marquee>,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { textures: ThumbTextures::default(), scroll_to: None, tile: 128.0, path_edit: String::new(), path_edit_for: None, last_view: None, last_visible: 0..0, dialog: None, show_empty_folders: false }
+        Self { textures: ThumbTextures::default(), scroll_to: None, tile: 128.0, path_edit: String::new(), path_edit_for: None, last_view: None, last_visible: 0..0, dialog: None, show_empty_folders: false, marquee: None }
     }
 }
 
@@ -500,6 +512,18 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
         let origin = ui.max_rect().min;
         let painter = ui.painter().clone();
         let mods = ui.input(|i| i.modifiers);
+        //#region 빈 공간 — 타일보다 먼저 등록해 타일 아래에 깔린다 (타일 위 클릭·끌기는 타일 몫)
+        let bg_rect = Rect::from_min_size(origin, Vec2::new(ui.max_rect().width(), (rows as f32 * pitch_y).max(vp.max.y)));
+        let bg = ui.interact(bg_rect, ui.scope_id().with("iv-grid-bg"), Sense::CLICK | Sense::DRAG);
+        if bg.clicked() && !mods.command && !mods.shift {
+            out.actions.push(Action::SelectNone);
+        }
+        if bg.drag_started() {
+            if let Some(p) = bg.interact_pointer_pos() {
+                st.marquee = Some(Marquee { start: p - origin, keep: mods.command || mods.shift, last: Vec::new(), sent_begin: false });
+            }
+        }
+        //#endregion
         for r in first..last {
             for c in 0..cols {
                 let i = r * cols + c;
@@ -571,6 +595,48 @@ fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mu
                 }
             }
         }
+        //#region 선택 상자 — 닿는 타일을 고르고, 위·아래 끝에 가면 저절로 스크롤
+        if let Some(mq) = &mut st.marquee {
+            match ui.ctx().pointer_latest_pos() {
+                Some(p) if bg.dragged() => {
+                    let a = origin + mq.start;
+                    let sel = Rect::from_two_pos(a, p);
+                    // 내용 좌표에서 닿는 칸 계산 (화면 밖 줄도 포함)
+                    let (c0, c1) = (sel.min - origin, sel.max - origin);
+                    let r0 = (c0.y / pitch_y).floor().max(0.0) as usize;
+                    let r1 = ((c1.y / pitch_y).floor().max(0.0) as usize).min(rows.saturating_sub(1));
+                    let mut hit = Vec::new();
+                    for r in r0..=r1 {
+                        for c in 0..cols {
+                            let i = r * cols + c;
+                            if i >= n {
+                                break;
+                            }
+                            let cell = Rect::from_min_size(Pos2::new(left_pad + c as f32 * pitch_x, r as f32 * pitch_y), Vec2::new(tile, tile + LABEL_H));
+                            if cell.intersects(Rect::from_min_max(c0.to_pos2(), c1.to_pos2())) {
+                                hit.push(i);
+                            }
+                        }
+                    }
+                    if !mq.sent_begin || hit != mq.last {
+                        out.actions.push(Action::MarqueeSelect { indices: hit.clone(), keep: mq.keep, begin: !mq.sent_begin });
+                        mq.sent_begin = true;
+                        mq.last = hit;
+                    }
+                    painter.rect_filled(sel, CornerRadius::same(2), Color32::from_rgba_unmultiplied(70, 130, 220, 40));
+                    painter.rect_stroke(sel, CornerRadius::same(2), Stroke::new(1.0, Color32::from_rgb(100, 160, 240)), StrokeKind::Inside);
+                    let edge = 30.0;
+                    let view = ui.clip_rect();
+                    let dy = if p.y < view.min.y + edge { 12.0 } else if p.y > view.max.y - edge { -12.0 } else { 0.0 };
+                    if dy != 0.0 {
+                        ui.scroll_with_delta(Vec2::new(0.0, dy));
+                        ui.ctx().request_repaint();
+                    }
+                }
+                _ => st.marquee = None,
+            }
+        }
+        //#endregion
     });
 }
 

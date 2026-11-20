@@ -203,3 +203,22 @@ fn file_ops_follow_selection() {
     assert_eq!(v.current().unwrap().name, "zz.png");
     let _ = std::fs::remove_dir_all(&moved);
 }
+
+/// 선택 상자: 새로 그리면 그 항목들만, ⌘/⇧ 로 시작하면 기존 선택에 더함, 빈 곳 클릭은 모두 풀기
+#[test]
+fn marquee_select_rules() {
+    let (d, l, mut v) = setup("mq", 8);
+    let _ = v.open(&d, &l);
+    let _ = v.handle(Action::Select(0), &l);
+    let _ = v.handle(Action::MarqueeSelect { indices: vec![2, 3], keep: false, begin: true }, &l);
+    assert_eq!(v.trash_targets().len(), 2);
+    // 끄는 중 상자가 줄면 빠진다
+    let _ = v.handle(Action::MarqueeSelect { indices: vec![2], keep: false, begin: false }, &l);
+    assert_eq!(v.trash_targets().len(), 1);
+    // ⌘ 로 새 상자: 기존(2)에 더함
+    let _ = v.handle(Action::MarqueeSelect { indices: vec![5, 6], keep: true, begin: true }, &l);
+    assert_eq!(v.trash_targets().len(), 3);
+    let _ = v.handle(Action::SelectNone, &l);
+    assert!(v.trash_targets().is_empty());
+    let _ = std::fs::remove_dir_all(&d);
+}

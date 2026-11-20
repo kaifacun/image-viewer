@@ -64,6 +64,10 @@ pub enum Action {
     GridExtend { dx: isize, dy: isize },
     /// ⌘A
     SelectAll,
+    /// 빈 공간 클릭 — 선택 모두 풀기
+    SelectNone,
+    /// 빈 공간에서 끌어 그린 상자에 닿은 항목들. `keep` 이면 시작 때 선택에 더하고, `begin` 은 끌기의 첫 번째
+    MarqueeSelect { indices: Vec<usize>, keep: bool, begin: bool },
     /// 선택한 항목(전체 보기에선 보고 있는 장)을 휴지통으로 — 실제 이동은 앱이 한다
     Trash,
     // ── 파일·폴더 작업 (실제 작업은 앱이 한다 — [`ViewerState::take_file_op`]) ──
@@ -191,6 +195,8 @@ pub struct ViewerState {
     anchor: Option<EntryId>,
     /// 앱이 실행할 파일 작업 (Effects 는 Copy 라 여기 둔다)
     file_op: Option<FileOp>,
+    /// 선택 상자를 시작할 때의 선택 (⌘/⇧ 로 더할 때 바탕)
+    marquee_base: HashSet<EntryId>,
 }
 
 const ZOOM_STEP: f32 = 1.25;
@@ -214,6 +220,7 @@ impl ViewerState {
             marked: HashSet::new(),
             anchor: None,
             file_op: None,
+            marquee_base: HashSet::new(),
         }
     }
 
@@ -481,7 +488,26 @@ impl ViewerState {
                 self.marked = self.library.entries().iter().map(|e| e.id).collect();
                 Effects::redraw()
             }
-            Action::ToggleSelect(_) | Action::RangeSelect(_) | Action::GridExtend { .. } | Action::SelectAll => Effects::default(),
+            Action::SelectNone if self.mode == Mode::Browse => {
+                if self.marked.is_empty() {
+                    return Effects::default();
+                }
+                self.marked.clear();
+                Effects::redraw()
+            }
+            Action::MarqueeSelect { indices, keep, begin } if self.mode == Mode::Browse => {
+                if begin {
+                    self.marquee_base = if keep { self.marked.clone() } else { HashSet::new() };
+                }
+                let mut m = self.marquee_base.clone();
+                m.extend(indices.iter().filter_map(|&i| self.library.get(i)).map(|e| e.id));
+                if m == self.marked {
+                    return Effects::default();
+                }
+                self.marked = m;
+                Effects::redraw()
+            }
+            Action::ToggleSelect(_) | Action::RangeSelect(_) | Action::GridExtend { .. } | Action::SelectAll | Action::SelectNone | Action::MarqueeSelect { .. } => Effects::default(),
             Action::BeginRename | Action::BeginNewFolder => Effects::default(),
             Action::NewFolder { parent, name } => self.request(FileOp::NewFolder { parent, name }),
             Action::RenameFolder { path, name } => self.request(FileOp::RenameFolder { path, name }),
