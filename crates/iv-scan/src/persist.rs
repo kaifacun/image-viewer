@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::Verdict;
 
-const MAGIC: &str = "kaiiv-scan-v1";
+const MAGIC: &str = "kaiiv-scan-v2"; // v2: Finder 숨김 폴더 제외
 const SEP: char = '\u{1f}';
 
 /// 폴더 하나의 나열 결과 + 판정 (캐시 단위)

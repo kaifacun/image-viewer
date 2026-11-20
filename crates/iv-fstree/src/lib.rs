@@ -176,10 +176,25 @@ pub fn list_subdirs(p: &Path) -> Result<Vec<PathBuf>, String> {
         .flatten()
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false) || (e.file_type().map(|t| t.is_symlink()).unwrap_or(false) && e.path().is_dir()))
         .map(|e| e.path())
-        .filter(|p| !display_name(p).starts_with('.') && !is_bundle(p))
+        .filter(|p| !display_name(p).starts_with('.') && !is_bundle(p) && !finder_hidden(p))
         .collect();
     v.sort_by_key(|p| display_name(p).to_lowercase());
     Ok(v)
+}
+
+/// Finder 숨김 표시(chflags hidden — ~/Library 등)가 있는 항목. Finder 처럼 트리에서 뺀다.
+pub fn finder_hidden(p: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        const UF_HIDDEN: u32 = 0x8000;
+        use std::os::macos::fs::MetadataExt;
+        std::fs::symlink_metadata(p).is_ok_and(|m| m.st_flags() & UF_HIDDEN != 0)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = p;
+        false
+    }
 }
 
 /// macOS 패키지(.app 등)는 폴더처럼 보이지 않게
@@ -194,6 +209,18 @@ pub fn display_name(p: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finder_hidden_folders_are_not_listed() {
+        let d = std::env::temp_dir().join(format!("iv-fstree-hid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("shown")).unwrap();
+        std::fs::create_dir_all(d.join("secret")).unwrap();
+        assert!(std::process::Command::new("chflags").arg("hidden").arg(d.join("secret")).status().unwrap().success());
+        assert_eq!(list_subdirs(&d).unwrap(), vec![d.join("shown")]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn tmp() -> PathBuf {
         let d = std::env::temp_dir().join(format!("iv-fstree-{}", std::process::id()));

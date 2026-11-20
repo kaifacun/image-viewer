@@ -47,6 +47,7 @@
 - 사용자 홈 전체 스캔은 직접 돌리지 않는다(시험은 `IV_TREE_ROOTS=scratch`).
 - 파일 작업(새 폴더·이름 바꾸기·옮기기)은 `iv-fsops` — **덮어쓰기 금지**. 흐름: UI 대화 상자(`iv-ui/dialog.rs`) → `Action::NewFolder/RenameFolder/RenameFile` → 뷰어가 `FileOp` 보관 + `AppRequest::FileOp` → 앱이 실행 → `on_file_op` 로 목록 반영, 트리는 앱이(`renamed`·`invalidate`). 새/이름 바꾼 폴더는 `keep_visible` 로 숨김 예외. 시험: `act:newfolder=|renamefile=|renamefolder=<경로>|<이름>`, `act:move=<폴더>`, `type:글`, `key:f2`, `drag:x0,y0,x1,y1`(egui 드래그 판정 경유).
 - 끌어다 놓기: 타일은 `Sense::CLICK | Sense::DRAG`, 페이로드 `DragPhotos`(표식만 — 대상은 뷰어 선택), 트리 줄이 `dnd_release_payload` 로 `Action::MoveMarkedTo`. 자가 시험에서 shift-click 직후 바로 dblclick 하면 egui 가 세 번 클릭으로 본다(wait 넣기).
+- 트리·스캔 모두 **Finder 숨김 플래그(UF_HIDDEN)** 폴더 제외(`iv_fstree::finder_hidden`) — ~/Library 가 스캔 건너뜀(Unknown)이라 숨김 안 돼 하위가 줄줄이 보였다. 폴더 규칙을 바꾸면 `persist.rs` MAGIC 버전을 올린다.
 - 휴지통은 `iv-trash`(NSFileManager `trashItemAtURL`). 실패 시 `remove_file` 로 대체 금지.
 - **회전은 뷰어 상태(`turns`)** — 프레임에 굽지 않는다(파이프라인이 미리보기→본 디코드로 프레임을 갈아 끼우면 사라짐). `show()` 한 곳에서 `Orientation::rotated_quarters` 로 입히고, 다른 장·목록으로 가면 버린다. 렌더러(wgpu `upload`, CPU 축소 사본)는 **같은 픽셀이어도 방향은 매번 따라가야** 한다.
 - 돌려 저장은 `iv-rotate`: ImageIO `CopyImageSource` + `kCGImageDestinationOrientation`(JPEG·HEIC·PNG·TIFF 모두 크기 거의 그대로 = 재압축 없음). 점 임시 파일 → 다시 열어 방향·크기 확인 → xattr·ACL·권한 비트 복사(**COPYFILE_STAT 금지** — 시각·잠금 플래그 uchg 까지 옮겨 임시 파일이 잠긴 채 남았다) → **mtime 을 지금으로**(JPEG 은 크기가 같아 시각까지 같으면 EntryId·썸네일 캐시가 못 알아챔) → rename. 잠긴 원본은 미리 거부. 저장 방향 = 파일에 적힌 방향 + 돌린 양(`FileOp::Rotate{quarters}`). 시험 키: `key:r`, `key:l`, `key:cmd+s`.

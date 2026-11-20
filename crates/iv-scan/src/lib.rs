@@ -339,7 +339,8 @@ impl Walker {
                     _ => {}
                 }
             } else if ft.is_dir() {
-                if !is_bundle(&path) {
+                // 트리(list_subdirs)와 같은 규칙: 번들·Finder 숨김 폴더는 없는 셈
+                if !is_bundle(&path) && !finder_hidden(&path) {
                     l.subdirs.push(path);
                 }
             } else if ft.is_file() {
@@ -584,7 +585,7 @@ impl Walker {
         for c in rel.components() {
             let next = cur.join(c);
             let hidden = c.as_os_str().to_string_lossy().starts_with('.');
-            if hidden || is_bundle(&next) || self.skip(&next, (cur == root).then_some(cur.as_path())) {
+            if hidden || is_bundle(&next) || finder_hidden(&next) || self.skip(&next, (cur == root).then_some(cur.as_path())) {
                 return None;
             }
             cur = next;
@@ -681,6 +682,21 @@ struct DirEvent {
 use watch::DirEvent;
 
 /// 트리(`iv_fstree`)와 같은 번들 목록 — 트리에 없는 폴더는 판정에도 넣지 않는다
+/// Finder 숨김 표시(chflags hidden — ~/Library 등)가 있는 항목. Finder 처럼 트리에서 뺀다.
+fn finder_hidden(p: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        const UF_HIDDEN: u32 = 0x8000;
+        use std::os::macos::fs::MetadataExt;
+        std::fs::symlink_metadata(p).is_ok_and(|m| m.st_flags() & UF_HIDDEN != 0)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = p;
+        false
+    }
+}
+
 fn is_bundle(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e, "app" | "bundle" | "framework" | "photoslibrary" | "pkg"))
 }
