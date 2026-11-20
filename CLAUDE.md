@@ -45,7 +45,7 @@
 - 사용자 홈 전체 스캔은 직접 돌리지 않는다(시험은 `IV_TREE_ROOTS=scratch`).
 - 휴지통은 `iv-trash`(NSFileManager `trashItemAtURL`). 실패 시 `remove_file` 로 대체 금지.
 - 자가 시험 실입력: `click=x,y` `dblclick=x,y` `cmdclick:x,y` `shiftclick:x,y`(egui ModifiersChanged 주입) `scroll=x,y,dy`(점 좌표, egui 맞음 판정 경유), `key=right|enter|escape…`(단축키 표 경유), `wait-thumbs:ms`, `act:folder=|select=|activate=|toggle=|range=|selectall|trash|sort=size,desc|view|browse`.
-- 화면 검증: 앱 자가 캡처(IV_SELFTEST) 또는 `tools/winid.swift` 로 iv 창 ID 를 얻어 `screencapture -l <id>` (창 단위만).
+- 화면 검증: 앱 자가 캡처(IV_SELFTEST) 또는 `tools/winid.swift` 로 kaiiv 창 ID 를 얻어 `screencapture -l <id>` (창 단위만).
 
 ## 대표 여정 (시나리오 검수)
 - 전체 보기: 폴더 열기 → 사람 속도로 수십 장 넘기기(캐시 즉시) → 확대·이동 → 정보 창 → 장치 손실 모의(lost) → CPU 로 계속 넘기기·확대.
