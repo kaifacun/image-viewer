@@ -309,6 +309,17 @@ impl ViewerState {
         fx
     }
 
+    /// 폴더 내용이 밖에서 바뀌었을 때(감시): 목록이 실제로 달라졌을 때만 새로고침 (자기 휴지통 이동 등은 그대로)
+    pub fn refresh_if_changed(&mut self, loader: &Loader) -> Effects {
+        let Some(dir) = self.library.dir().map(Path::to_path_buf) else { return Effects::default() };
+        let Ok(lib) = Library::open(&dir, &self.extensions) else { return self.refresh(loader) };
+        let now: HashSet<EntryId> = self.library.entries().iter().map(|e| e.id).collect();
+        if lib.len() == now.len() && lib.entries().iter().all(|e| now.contains(&e.id)) {
+            return Effects::default();
+        }
+        self.refresh(loader)
+    }
+
     /// 미리보기 칸 크기 (물리 px). 해상도 요청은 모니터 기준이라 재디코드를 부르지 않는다.
     pub fn set_preview_screen(&mut self, size: [f32; 2]) -> Effects {
         if self.preview.screen == size {

@@ -69,6 +69,8 @@ struct App {
     /// 백그라운드 사진 폴더 스캔 (트리에서 사진 없는 폴더 숨김)
     scanner: Scanner,
     wait_scan_until: Option<Instant>,
+    /// 전체 보기 중 열린 폴더가 밖에서 바뀜 — 브라우저로 돌아오면 확인 (전체 보기 확대 상태를 깨지 않게)
+    dir_dirty: bool,
     browser: BrowserState,
     /// 썸네일 생성에 실패한 항목 (타일 경고·재요청 제외)
     thumb_failed: HashSet<u64>,
@@ -108,7 +110,8 @@ impl App {
         });
         //#region 백그라운드 스캔 — 트리 루트 전부, 현재 장 디코드에 양보
         let tree = FolderTree::new(FolderTree::default_roots());
-        let scanner = Scanner::start(ScanConfig { roots: tree.root_paths(), extensions: extensions.clone(), gate: Some(gate.clone()) }, move || {
+        let ignore = iv_thumbs::default_cache_dir().into_iter().collect();
+        let scanner = Scanner::start(ScanConfig { roots: tree.root_paths(), extensions: extensions.clone(), gate: Some(gate.clone()), ignore }, move || {
             let _ = p2.send_event(UserEvent::ScanWake);
         });
         //#endregion
@@ -126,6 +129,7 @@ impl App {
             tree,
             scanner,
             wait_scan_until: None,
+            dir_dirty: false,
             browser: BrowserState::default(),
             thumb_failed: HashSet::new(),
             last_requested: Vec::new(),
@@ -147,6 +151,12 @@ impl App {
     }
 
     fn apply(&mut self, fx: Effects, el: &ActiveEventLoop) {
+        // 전체 보기 중 바뀐 열린 폴더는 브라우저로 돌아왔을 때 확인
+        if self.dir_dirty && self.viewer.mode == Mode::Browse {
+            self.dir_dirty = false;
+            let fx2 = self.viewer.refresh_if_changed(&self.loader);
+            self.apply(fx2, el);
+        }
         // 전체 보기 중엔 썸네일 생성을 멈춘다 (멱등 — 시작 모드·모든 전환을 한 곳에서)
         self.thumbs.set_paused(self.viewer.mode == Mode::View);
         if fx.library_changed {
@@ -685,6 +695,21 @@ impl ApplicationHandler<UserEvent> for App {
                 self.apply(fx, el);
             }
             UserEvent::ScanWake => {
+                //#region 바뀐 폴더 반영 — 트리는 그 폴더 하위 목록만 다시 읽고, 열린 폴더면 목록이 달라졌을 때만 새로고침
+                let changed = self.scanner.take_changed();
+                let open_dir = self.viewer.library.dir().map(Path::to_path_buf);
+                for d in &changed {
+                    self.tree.invalidate(d);
+                    if open_dir.as_deref() == Some(d.as_path()) {
+                        self.dir_dirty = true;
+                    }
+                }
+                if self.dir_dirty && self.viewer.mode == Mode::Browse {
+                    self.dir_dirty = false;
+                    let fx = self.viewer.refresh_if_changed(&self.loader);
+                    self.apply(fx, el);
+                }
+                //#endregion
                 if self.viewer.mode == Mode::Browse {
                     if let Some(g) = &self.gfx {
                         g.window.request_redraw();
