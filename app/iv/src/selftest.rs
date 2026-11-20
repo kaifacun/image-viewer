@@ -131,6 +131,7 @@ fn parse(t: &str) -> Option<Step> {
             "kind=image" => Action::SetKind(iv_core::formats::MediaKind::Image),
             "kind=video" => Action::SetKind(iv_core::formats::MediaKind::Video),
             "kind=document" => Action::SetKind(iv_core::formats::MediaKind::Document),
+            "kind=all" => Action::SetAllFiles(true),
             other => {
                 if let Some(p) = other.strip_prefix("pan=") {
                     let (x, y) = p.split_once(',')?;
@@ -160,6 +161,11 @@ fn parse(t: &str) -> Option<Step> {
                     // filter=jpg,jpeg,png · filter= (해제). 시험 한 번에 몇 개뿐이라 leak 해도 된다
                     let v: Vec<&'static str> = f.split(',').filter(|x| !x.is_empty()).map(|x| &*Box::leak(x.to_ascii_lowercase().into_boxed_str())).collect();
                     Action::SetFilter((!v.is_empty()).then_some(v))
+                } else if let Some(p) = other.strip_prefix("trashfolder=") {
+                    // 확인 창을 거친 것과 같게 — 지금의 (dev, ino) 를 붙인다
+                    let path = PathBuf::from(p);
+                    let ident = iv_ui::dialog::folder_ident(&path);
+                    Action::TrashFolder { path, ident }
                 } else if let Some(p) = other.strip_prefix("paste=") {
                     Action::Paste(Some(PathBuf::from(p)))
                 } else if let Some(q) = other.strip_prefix("rotatemarked=") {

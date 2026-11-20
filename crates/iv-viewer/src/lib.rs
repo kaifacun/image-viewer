@@ -102,6 +102,11 @@ pub enum Action {
     SetFilter(Option<Vec<&'static str>>),
     /// 화면 종류 바꾸기 (사진 ↔ 비디오) — 필터는 풀고 목록을 그 종류로 다시 나열
     SetKind(MediaKind),
+    /// "모든 파일" 보기 켜기·끄기 — 격자에 폴더의 모든 파일, 트리에 모든 폴더. 이 보기에서만 폴더를 휴지통으로 보낼 수 있다
+    SetAllFiles(bool),
+    /// 이 폴더를 휴지통으로 ("모든 파일" 보기·브라우저에서만) — 실제 이동은 앱이
+    /// `ident` = 확인 창을 열 때의 (dev, ino) — 그 사이 다른 것으로 바뀌었으면 앱이 거부한다
+    TrashFolder { path: PathBuf, ident: Option<(u64, u64)> },
     /// 비디오 재생 조작 (전체 보기에서) — 실제 재생기는 앱이 가진다
     Video(VideoCmd),
     /// 문서 쪽 넘기기 (전체 보기) — 쪽 상태는 앱이 가진다
@@ -154,6 +159,8 @@ pub enum FileOp {
     RotateMarked { quarters: u8 },
     /// 클립보드의 파일을 `dest` 에 복사(잘라냈으면 옮김) — 결과는 [`ViewerState::on_pasted`]
     Paste { dest: PathBuf },
+    /// 폴더를 휴지통으로 (성공하면 그 경로를 돌려준다)
+    TrashFolder { path: PathBuf, ident: Option<(u64, u64)> },
 }
 
 /// 클립보드 작업 (대상은 [`ViewerState::trash_targets`] / [`ViewerState::path_targets`])
@@ -275,6 +282,8 @@ pub struct ViewerState {
     /// 지금 보는 종류와 종류별 확장자 (비어 있으면 종류 구분 없이 `extensions` 전부)
     kind: MediaKind,
     kinds: Vec<(MediaKind, HashSet<&'static str>)>,
+    /// "모든 파일" 보기 — 확장자와 상관없이 다 나열 (종류는 전체 보기·재생기를 위해 그대로 둔다)
+    all_files: bool,
     /// 브라우저에서 선택된 항목들 (정렬해도 유지되게 id 로). 평범한 이동은 현재 항목 하나로 되돌린다.
     marked: HashSet<EntryId>,
     /// ⇧ 범위 선택의 기준 항목
@@ -314,6 +323,7 @@ impl ViewerState {
             filter: None,
             kind: MediaKind::Image,
             kinds: Vec::new(),
+            all_files: false,
             marked: HashSet::new(),
             anchor: None,
             file_op: None,
@@ -340,6 +350,83 @@ impl ViewerState {
 
     pub fn kind(&self) -> MediaKind {
         self.kind
+    }
+
+    /// "모든 파일" 보기인가
+    pub fn all_files(&self) -> bool {
+        self.all_files
+    }
+
+    /// 항목의 종류 (확장자로)
+    pub fn entry_kind(&self, e: &Entry) -> Option<MediaKind> {
+        e.path().and_then(|p| self.kind_of_path(p))
+    }
+
+    /// 등록된 형식인가 (썸네일·미리보기를 만들 수 있음)
+    pub fn decodable(&self, e: &Entry) -> bool {
+        e.path().and_then(|p| p.extension()).and_then(|x| x.to_str()).is_some_and(|x| self.extensions.contains(x.to_ascii_lowercase().as_str()))
+    }
+
+    /// 지금 종류로 전체 보기를 할 수 있는가 — 종류가 다르면 재생기·쪽 넘김이 그 종류에 묶여 있어 열지 않는다.
+    /// "모든 파일" 보기가 아니면 목록 자체가 지금 종류뿐이라 늘 참.
+    pub fn viewable(&self, e: &Entry) -> bool {
+        if !self.all_files {
+            return true;
+        }
+        self.decodable(e) && (self.kinds.is_empty() || e.path().and_then(|p| self.kind_of_path(p)) == Some(self.kind))
+    }
+
+    /// 파이프라인에 넘길 항목인가 (브라우저 = 미리보기 가능, 전체 보기 = 지금 종류로 볼 수 있음)
+    fn wants(&self, e: &Entry) -> bool {
+        match self.mode {
+            Mode::Browse => !self.all_files || self.decodable(e),
+            Mode::View => self.viewable(e),
+        }
+    }
+
+    /// 목록을 연다 — 지금 보기("모든 파일" 또는 종류 ∩ 필터)로
+    fn open_lib(&self, p: &Path) -> std::io::Result<Library> {
+        if self.all_files { Library::open_all(p) } else { Library::open(p, &self.exts()) }
+    }
+
+    /// 볼 수 없는 파일을 열려 할 때 알림
+    fn not_viewable_notice(&self, e: &Entry) -> String {
+        match e.path().and_then(|p| self.kind_of_path(p)).filter(|_| self.decodable(e)) {
+            Some(k) => {
+                let n = MediaKind::ALL.iter().position(|x| *x == k).map_or(0, |i| i + 1);
+                format!("{} 보기(⌘{n})에서 열 수 있습니다", k.label())
+            }
+            None => "이 형식은 볼 수 없습니다".to_string(),
+        }
+    }
+
+    /// 전체 보기에서 i 부터 d 방향(±1)으로 볼 수 있는 항목 찾기 (순환하지 않음)
+    fn viewable_from(&self, i: usize, d: isize) -> Option<usize> {
+        let n = self.library.len() as isize;
+        let mut k = i as isize;
+        while (0..n).contains(&k) {
+            if self.library.get(k as usize).is_some_and(|e| self.viewable(e)) {
+                return Some(k as usize);
+            }
+            k += d;
+        }
+        None
+    }
+
+    /// 전체 보기의 현재 항목이 볼 수 없게 됐으면 (지움·새로고침) 가까운 볼 수 있는 항목으로, 없으면 브라우저로
+    fn fix_view_current(&mut self, loader: &Loader) -> Effects {
+        if self.mode != Mode::View || self.library.current().is_none_or(|e| self.viewable(e)) {
+            return Effects::default();
+        }
+        let i = self.library.index();
+        match self.viewable_from(i, 1).or_else(|| self.viewable_from(i, -1)) {
+            Some(j) => self.go(j, loader),
+            None if self.browse_available => {
+                self.mode = Mode::Browse;
+                Effects::nav().with_reveal()
+            }
+            None => Effects::default(),
+        }
     }
 
     /// 확장자의 종류
@@ -404,10 +491,11 @@ impl ViewerState {
             Mode::Browse => (0, 0),
         };
         let (ahead, behind) = self.library.neighbors(na, nb);
-        let conv = |v: Vec<&Entry>| v.into_iter().map(|e| (e.id.0, e.source.clone())).collect();
+        // "모든 파일" 보기: 볼 수 없는 파일은 디코드하지 않는다 (실패 폭주·쓸데없는 미리 읽기 방지)
+        let conv = |v: Vec<&Entry>| v.into_iter().filter(|e| self.wants(e)).map(|e| (e.id.0, e.source.clone())).collect();
         Window {
             generation: self.generation,
-            current: self.library.current().map(|e| (e.id.0, e.source.clone())),
+            current: self.library.current().filter(|e| self.wants(e)).map(|e| (e.id.0, e.source.clone())),
             current_want: Want::Side(self.current_want()),
             ahead: conv(ahead),
             behind: conv(behind),
@@ -426,7 +514,7 @@ impl ViewerState {
             }
         }
         let mode = if is_dir && self.browse_available { Mode::Browse } else { Mode::View };
-        match Library::open(path, &self.exts()) {
+        match self.open_lib(path) {
             Ok(lib) => {
                 self.library = lib;
                 self.mode = mode;
@@ -458,7 +546,7 @@ impl ViewerState {
         let Some(dir) = self.library.dir().map(Path::to_path_buf) else { return Effects::default() };
         let cur = self.library.current().and_then(|e| e.path().map(Path::to_path_buf));
         let (key, asc) = self.library.sort_order();
-        let Ok(mut lib) = Library::open(&dir, &self.exts()) else { return self.open(&dir, loader) };
+        let Ok(mut lib) = self.open_lib(&dir) else { return self.open(&dir, loader) };
         lib.sort(key, asc);
         if let Some(i) = cur.and_then(|c| lib.entries().iter().position(|e| e.path() == Some(c.as_path()))) {
             lib.go_to(i);
@@ -472,6 +560,7 @@ impl ViewerState {
             self.marked = alive;
             self.anchor = anchor.filter(|a| self.marked.contains(a));
         }
+        fx = fx.merge(self.fix_view_current(loader));
         fx.library_changed = true;
         fx
     }
@@ -479,7 +568,7 @@ impl ViewerState {
     /// 폴더 내용이 밖에서 바뀌었을 때(감시): 목록이 실제로 달라졌을 때만 새로고침 (자기 휴지통 이동 등은 그대로)
     pub fn refresh_if_changed(&mut self, loader: &Loader) -> Effects {
         let Some(dir) = self.library.dir().map(Path::to_path_buf) else { return Effects::default() };
-        let Ok(lib) = Library::open(&dir, &self.exts()) else { return self.refresh(loader) };
+        let Ok(lib) = self.open_lib(&dir) else { return self.refresh(loader) };
         let now: HashSet<EntryId> = self.library.entries().iter().map(|e| e.id).collect();
         if lib.len() == now.len() && lib.entries().iter().all(|e| now.contains(&e.id)) {
             return Effects::default();
@@ -651,8 +740,15 @@ impl ViewerState {
             }
             Action::Next => self.step(1, loader).with_reveal(),
             Action::Prev => self.step(-1, loader).with_reveal(),
-            Action::First => self.go(0, loader).with_reveal(),
-            Action::Last => self.go(self.library.len().saturating_sub(1), loader).with_reveal(),
+            Action::First => {
+                let i = if self.mode == Mode::View { self.viewable_from(0, 1) } else { Some(0) };
+                i.map_or_else(Effects::default, |i| self.go(i, loader).with_reveal())
+            }
+            Action::Last => {
+                let last = self.library.len().saturating_sub(1);
+                let i = if self.mode == Mode::View { self.viewable_from(last, -1) } else { Some(last) };
+                i.map_or_else(Effects::default, |i| self.go(i, loader).with_reveal())
+            }
             Action::ZoomIn => self.zoom(|v| v.zoom_by(ZOOM_STEP, center)),
             Action::ZoomOut => self.zoom(|v| v.zoom_by(1.0 / ZOOM_STEP, center)),
             Action::ZoomBy { factor, anchor } => self.zoom(|v| v.zoom_by(factor, anchor)),
@@ -722,10 +818,11 @@ impl ViewerState {
                 self.request(FileOp::MoveTo { dest })
             }
             Action::SetKind(k) => {
-                if k == self.kind {
+                if k == self.kind && !self.all_files {
                     return Effects::default();
                 }
                 self.kind = k;
+                self.all_files = false;
                 self.filter = None;
                 let _ = self.set_turns(0);
                 if self.browse_available {
@@ -741,6 +838,30 @@ impl ViewerState {
                     None => Effects::redraw(),
                 }
             }
+            Action::SetAllFiles(on) => {
+                if on == self.all_files {
+                    return Effects::default();
+                }
+                self.all_files = on;
+                // 필터는 "모든 파일"과 섞이지 않는다 (걸린 것처럼 보이는데 적용 안 되는 어긋남 방지)
+                self.filter = None;
+                let _ = self.set_turns(0);
+                if self.browse_available {
+                    self.mode = Mode::Browse;
+                }
+                // 같은 폴더를 새 보기로 다시 나열 (현재 항목·선택 중 남는 것은 지킨다)
+                if self.library.dir().is_some() { self.refresh(loader) } else { Effects::redraw() }
+            }
+            Action::TrashFolder { path, ident } => {
+                if self.mode != Mode::Browse {
+                    return Effects::default();
+                }
+                if !self.all_files {
+                    self.notice = Some("폴더는 \"모든 파일\" 보기(⌘4)에서만 휴지통으로 보낼 수 있습니다".to_string());
+                    return Effects::redraw();
+                }
+                self.request(FileOp::TrashFolder { path, ident })
+            }
             Action::InstallCodecs | Action::DismissCodecPrompt | Action::ToggleMarkdown => Effects::default(),
             Action::Page(cmd) => {
                 if self.mode != Mode::View || self.kind != MediaKind::Document {
@@ -755,6 +876,9 @@ impl ViewerState {
                 Effects { app: Some(AppRequest::Video(cmd)), ..Default::default() }
             }
             Action::SetFilter(f) => {
+                if self.all_files {
+                    return Effects::default();
+                }
                 let f: Option<HashSet<&'static str>> = f.filter(|v| !v.is_empty()).map(|v| v.into_iter().collect());
                 if f == self.filter {
                     return Effects::default();
@@ -771,7 +895,7 @@ impl ViewerState {
                 fx
             }
             Action::RotateMarked(q) => {
-                if self.mode != Mode::Browse || q % 4 == 0 || self.kind != MediaKind::Image || self.trash_targets().is_empty() {
+                if self.mode != Mode::Browse || q % 4 == 0 || self.kind != MediaKind::Image || self.all_files || self.trash_targets().is_empty() {
                     return Effects::default();
                 }
                 self.request(FileOp::RotateMarked { quarters: q % 4 })
@@ -884,6 +1008,24 @@ impl ViewerState {
         };
         match op {
             FileOp::MoveTo { .. } | FileOp::RotateMarked { .. } | FileOp::Paste { .. } => Effects::redraw(),
+            FileOp::TrashFolder { path, .. } => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let parent = path.parent().map(Path::to_path_buf);
+                let open_dir = self.library.dir().map(Path::to_path_buf);
+                let mut fx = match (&open_dir, &parent) {
+                    // 열린 폴더(또는 그 조상)를 지웠다 → 지운 폴더의 부모로
+                    (Some(d), Some(par)) if d.starts_with(path) => {
+                        self.mode = Mode::Browse;
+                        self.open(par, loader)
+                    }
+                    // 열린 폴더 바로 안의 폴더 → 하위 폴더 수가 바뀜
+                    (Some(d), Some(par)) if d == par => self.refresh(loader),
+                    _ => Effects::redraw(),
+                };
+                self.notice = Some(format!("'{name}' 폴더를 휴지통으로 옮김"));
+                fx.library_changed = true;
+                fx
+            }
             FileOp::Rotate { path, .. } => {
                 // 파일이 바뀌었다(mtime) → 항목을 다시 읽어 id 가 바뀐다. 화면 프레임은 이미 저장된 방향이라 그대로 둔다 (깜박임·확대 유지).
                 let Some((old_id, new_id)) = self.library.rename_entry(path, new) else { return Effects::redraw() };
@@ -973,6 +1115,12 @@ impl ViewerState {
     }
 
     /// 앱이 클립보드에 쓴 뒤 상태줄에 알림 (오류면 오류로)
+    /// 상태줄 안내 한 줄 (앱이 직접 알릴 때 — 예: 트리에서 지울 수 없는 폴더)
+    pub fn say(&mut self, msg: impl Into<String>) -> Effects {
+        self.notice = Some(msg.into());
+        Effects::redraw()
+    }
+
     pub fn on_clipboard(&mut self, result: Result<String, String>) -> Effects {
         match result {
             Ok(n) => self.notice = Some(n),
@@ -1066,6 +1214,7 @@ impl ViewerState {
             if self.library.is_empty() && self.mode == Mode::View && self.browse_available {
                 self.mode = Mode::Browse;
             }
+            fx = fx.merge(self.fix_view_current(loader));
         }
         // after_navigation 이 오류를 지우므로 그 뒤에 쓴다
         if !failures.is_empty() {
@@ -1078,6 +1227,10 @@ impl ViewerState {
     fn enter_view(&mut self) -> Effects {
         if self.mode == Mode::View || self.library.current().is_none() {
             return Effects::default();
+        }
+        if let Some(e) = self.library.current().filter(|e| !self.viewable(e)) {
+            self.notice = Some(self.not_viewable_notice(e));
+            return Effects::redraw();
         }
         self.mode = Mode::View;
         self.viewport.fit();
@@ -1098,8 +1251,15 @@ impl ViewerState {
     fn step(&mut self, d: isize, loader: &Loader) -> Effects {
         let n = self.library.len() as isize;
         if self.mode == Mode::View && n > 1 {
-            let i = (self.library.index() as isize + d).rem_euclid(n) as usize;
-            return self.go(i, loader);
+            // 볼 수 없는 항목("모든 파일" 보기의 다른 종류·형식)은 건너뛴다 — 한 바퀴 안에서
+            let mut i = self.library.index() as isize;
+            for _ in 0..n {
+                i = (i + d).rem_euclid(n);
+                if self.library.get(i as usize).is_some_and(|e| self.viewable(e)) {
+                    return self.go(i as usize, loader);
+                }
+            }
+            return Effects::default();
         }
         if self.library.step(d) { self.after_navigation(loader) } else { Effects::default() }
     }

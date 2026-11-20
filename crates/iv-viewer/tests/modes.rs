@@ -404,3 +404,45 @@ fn view_navigation_wraps() {
     assert_eq!(v.library.index(), 2, "격자는 끝에서 멈춤");
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// "모든 파일" 보기: 사진 아닌 파일도 나열, 전체 보기는 볼 수 있는 것만, 폴더 휴지통은 이 보기에서만
+#[test]
+fn all_files_view_and_folder_trash_gate() {
+    let (d, l, mut v) = setup("all", 3);
+    std::fs::write(d.join("a-note.txt"), "x").unwrap();
+    std::fs::write(d.join("img01b.md"), "# x").unwrap();
+    let _ = v.open(&d, &l);
+    assert_eq!(v.library.len(), 3);
+    // 사진 보기에선 폴더 휴지통 거부 (요청 없음, 안내)
+    let fx = v.handle(Action::TrashFolder { path: d.join("sub"), ident: None }, &l);
+    assert!(fx.app.is_none() && v.notice.is_some());
+    let fx = v.handle(Action::SetAllFiles(true), &l);
+    assert!(fx.library_changed && v.all_files());
+    assert_eq!(v.library.len(), 5, "txt·md 도 보여야 함");
+    // 볼 수 없는 파일: 전체 보기로 가지 않고 안내, 파이프라인에도 넘기지 않음
+    let note = v.library.entries().iter().position(|e| e.name == "a-note.txt").unwrap();
+    let _ = v.handle(Action::Select(note), &l);
+    assert!(v.window().current.is_none());
+    let _ = v.handle(Action::EnterView, &l);
+    assert_eq!(v.mode, Mode::Browse);
+    assert!(v.notice.is_some());
+    // 사진에서 전체 보기 → 넘기면 볼 수 없는 파일은 건너뜀 (순환)
+    let first = v.library.entries().iter().position(|e| e.name == "img00.png").unwrap();
+    let _ = v.handle(Action::Activate(first), &l);
+    assert_eq!(v.mode, Mode::View);
+    for _ in 0..7 {
+        let _ = v.handle(Action::Next, &l);
+        let cur = v.library.current().unwrap();
+        assert!(cur.name.ends_with(".png"), "건너뛰지 않음: {}", cur.name);
+        assert!(v.window().ahead.iter().chain(&v.window().behind).count() <= 3);
+    }
+    let _ = v.handle(Action::ExitView, &l);
+    // 이 보기에선 폴더 휴지통 요청이 앱으로 간다
+    let fx = v.handle(Action::TrashFolder { path: d.join("sub"), ident: None }, &l);
+    assert!(fx.app.is_some());
+    // 종류 칸을 누르면 풀린다 (같은 종류여도)
+    let fx = v.handle(Action::SetKind(iv_core::formats::MediaKind::Image), &l);
+    assert!(fx.library_changed && !v.all_files());
+    assert_eq!(v.library.len(), 3);
+    let _ = std::fs::remove_dir_all(&d);
+}

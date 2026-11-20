@@ -228,6 +228,15 @@ impl FolderTree {
         }
     }
 
+    /// 폴더가 지워졌을 때: 그 경로와 하위의 펼침·목록 캐시를 지우고 상위 목록을 다시 읽는다
+    pub fn removed(&mut self, path: &Path) {
+        self.expanded.retain(|p| !p.starts_with(path));
+        self.children.retain(|k, _| !k.starts_with(path));
+        if let Some(parent) = path.parent() {
+            self.invalidate(parent);
+        }
+    }
+
     /// 한 폴더의 하위 목록만 다시 읽게 한다 (새 폴더가 생겼을 때)
     pub fn invalidate(&mut self, p: &Path) {
         if self.children.remove(p).is_some() && self.expanded.contains(p) {
@@ -289,14 +298,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    fn tmp() -> PathBuf {
-        let d = std::env::temp_dir().join(format!("iv-fstree-{}", std::process::id()));
+    /// 시험마다 다른 폴더 (병렬 실행 시 서로 지우지 않게)
+    fn tmp_named(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("iv-fstree-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         for s in ["a/x", "a/y/z", "b", ".hidden", "c.app"] {
             std::fs::create_dir_all(d.join(s)).unwrap();
         }
         std::fs::write(d.join("a/file.jpg"), b"x").unwrap();
         d
+    }
+
+    fn tmp() -> PathBuf {
+        tmp_named("lazy")
     }
 
     #[test]
@@ -320,6 +334,20 @@ mod tests {
         // 숨김 조건: b 를 숨기면 줄에서 빠진다
         let rows = t.visible_rows_where(&|p| p.ends_with("b"));
         assert!(rows.iter().all(|r| r.name != "b"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn removed_clears_subtree_and_refreshes_parent() {
+        let d = tmp_named("removed");
+        let mut t = FolderTree::new(vec![("root".into(), d.clone())]);
+        t.toggle(&d);
+        t.expand_to(&d.join("a/y/z"));
+        std::fs::remove_dir_all(d.join("a")).unwrap();
+        t.removed(&d.join("a"));
+        assert!(!t.is_expanded(&d.join("a")) && !t.is_expanded(&d.join("a/y")));
+        let names: Vec<_> = t.visible_rows().iter().map(|r| r.name.clone()).collect();
+        assert_eq!(names, ["root", "b"]);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -67,6 +67,15 @@ pub struct Library {
 impl Library {
     /// 파일 또는 폴더를 연다. 파일이면 같은 폴더를 스캔하고 그 파일에 위치한다.
     pub fn open(path: &Path, extensions: &HashSet<&'static str>) -> std::io::Result<Self> {
+        Self::open_filtered(path, Some(extensions))
+    }
+
+    /// 확장자와 상관없이 폴더의 모든 파일(숨김 제외)을 연다 — "모든 파일" 보기
+    pub fn open_all(path: &Path) -> std::io::Result<Self> {
+        Self::open_filtered(path, None)
+    }
+
+    fn open_filtered(path: &Path, extensions: Option<&HashSet<&'static str>>) -> std::io::Result<Self> {
         let path = path.canonicalize()?;
         let (dir, start) = if path.is_dir() { (path.clone(), None) } else { (path.parent().unwrap_or(Path::new("/")).to_path_buf(), Some(path.clone())) };
         let mut subdirs = 0;
@@ -78,7 +87,7 @@ impl Library {
                     subdirs += usize::from(!is_hidden(p));
                     return false;
                 }
-                p.is_file() && !is_hidden(p) && has_ext(p, extensions)
+                p.is_file() && !is_hidden(p) && extensions.is_none_or(|x| has_ext(p, x))
             })
             .collect();
         // 열려는 파일이 확장자 목록에 없어도(예: 확장자 없는 파일) 목록에 넣는다

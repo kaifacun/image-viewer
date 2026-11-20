@@ -1,7 +1,9 @@
-//! 이름 입력 대화 상자 (새 폴더 · 폴더 이름 바꾸기 · 사진 이름 바꾸기).
+//! 대화 상자: 이름 입력(새 폴더 · 폴더 이름 바꾸기 · 사진 이름 바꾸기)과 폴더 휴지통 확인.
 //! 상태를 바꾸지 않고, 확인하면 [`Action`] 을 돌려준다.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use egui::text::{CCursor, CCursorRange};
 use egui::{Color32, Id, RichText};
@@ -12,6 +14,74 @@ pub enum DialogKind {
     NewFolder { parent: PathBuf },
     RenameFolder { path: PathBuf },
     RenameFile { path: PathBuf },
+    /// 폴더를 휴지통으로 — 확인 창 (하위를 백그라운드로 센다)
+    TrashFolder { path: PathBuf, count: Arc<FolderCount>, ident: Option<(u64, u64)> },
+}
+
+/// 폴더 안 세기 결과 (참고용 — 세는 중에도 확인할 수 있다)
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CountSummary {
+    pub files: u64,
+    pub folders: u64,
+    pub bytes: u64,
+    pub done: bool,
+}
+
+/// 백그라운드 세기. 마지막 참조가 사라지면(대화 상자 닫힘) 세기를 멈춘다.
+#[derive(Debug)]
+pub struct FolderCount {
+    summary: Arc<Mutex<CountSummary>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl FolderCount {
+    fn start(root: PathBuf) -> Arc<Self> {
+        let summary = Arc::new(Mutex::new(CountSummary::default()));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (s, c) = (summary.clone(), cancel.clone());
+        let _ = std::thread::Builder::new().name("iv-count".into()).spawn(move || {
+            // 링크는 따라가지 않는다 (휴지통도 링크 자체만 옮긴다)
+            let mut stack = vec![root];
+            let mut local = CountSummary::default();
+            let mut n = 0u32;
+            while let Some(d) = stack.pop() {
+                if c.load(Ordering::Relaxed) {
+                    return;
+                }
+                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                for e in rd.flatten() {
+                    let Ok(m) = e.path().symlink_metadata() else { continue };
+                    if m.is_dir() {
+                        local.folders += 1;
+                        stack.push(e.path());
+                    } else {
+                        local.files += 1;
+                        local.bytes += m.len();
+                    }
+                    n += 1;
+                    if n % 256 == 0 {
+                        *s.lock().unwrap_or_else(|e| e.into_inner()) = local;
+                        if c.load(Ordering::Relaxed) {
+                            return;
+                        }
+                    }
+                }
+            }
+            local.done = true;
+            *s.lock().unwrap_or_else(|e| e.into_inner()) = local;
+        });
+        Arc::new(Self { summary, cancel })
+    }
+
+    pub fn get(&self) -> CountSummary {
+        *self.summary.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl Drop for FolderCount {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -20,6 +90,20 @@ pub struct Dialog {
     text: String,
     /// 첫 프레임: 입력 칸에 포커스 + 선택 범위 지정
     fresh: bool,
+}
+
+/// 폴더의 (dev, ino) — 링크를 따라가지 않는다
+pub fn folder_ident(p: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        p.symlink_metadata().ok().map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        None
+    }
 }
 
 fn name_of(p: &Path) -> String {
@@ -46,11 +130,19 @@ impl Dialog {
         Self { text: name_of(&path), kind: DialogKind::RenameFile { path }, fresh: true }
     }
 
+    /// 폴더 휴지통 확인 — 열자마자 안을 세기 시작한다
+    pub fn trash_folder(path: PathBuf) -> Self {
+        let count = FolderCount::start(path.clone());
+        let ident = folder_ident(&path);
+        Self { text: name_of(&path), kind: DialogKind::TrashFolder { path, count, ident }, fresh: true }
+    }
+
     fn title(&self) -> &'static str {
         match self.kind {
             DialogKind::NewFolder { .. } => "새 폴더",
             DialogKind::RenameFolder { .. } => "폴더 이름 바꾸기",
             DialogKind::RenameFile { .. } => "사진 이름 바꾸기",
+            DialogKind::TrashFolder { .. } => "폴더를 휴지통으로",
         }
     }
 
@@ -79,6 +171,7 @@ impl Dialog {
             DialogKind::NewFolder { parent } => Action::NewFolder { parent: parent.clone(), name },
             DialogKind::RenameFolder { path } => Action::RenameFolder { path: path.clone(), name },
             DialogKind::RenameFile { path } => Action::RenameFile { path: path.clone(), name },
+            DialogKind::TrashFolder { path, ident, .. } => Action::TrashFolder { path: path.clone(), ident: *ident },
         }
     }
 
@@ -86,7 +179,7 @@ impl Dialog {
     fn unchanged(&self, name: &str) -> bool {
         match &self.kind {
             DialogKind::RenameFolder { path } | DialogKind::RenameFile { path } => name_of(path) == name,
-            DialogKind::NewFolder { .. } => false,
+            DialogKind::NewFolder { .. } | DialogKind::TrashFolder { .. } => false,
         }
     }
 }
@@ -99,6 +192,10 @@ pub enum DialogResult {
 
 /// 대화 상자를 그린다 (모달 — 뒤의 격자·트리는 막힌다)
 pub fn draw(ctx: &egui::Context, d: &mut Dialog) -> DialogResult {
+    if let DialogKind::TrashFolder { path, count, .. } = &d.kind {
+        let (path, c) = (path.clone(), count.get());
+        return draw_trash_folder(ctx, d, &path, c);
+    }
     let mut result = DialogResult::Open;
     let resp = egui::Modal::new(Id::unique("iv-dialog")).show(ctx, |ui| {
         ui.set_width(360.0);
@@ -133,6 +230,41 @@ pub fn draw(ctx: &egui::Context, d: &mut Dialog) -> DialogResult {
         if enter && check.is_err() {
             out.response.request_focus();
         }
+    });
+    if matches!(result, DialogResult::Open) && (resp.should_close() || ctx.input(|i| i.key_pressed(egui::Key::Escape))) {
+        result = DialogResult::Cancel;
+    }
+    result
+}
+
+/// 폴더 휴지통 확인 창 — 입력 칸 없음. 처음 포커스는 "취소" (Enter 로 실수하지 않게).
+fn draw_trash_folder(ctx: &egui::Context, d: &mut Dialog, path: &Path, c: CountSummary) -> DialogResult {
+    let mut result = DialogResult::Open;
+    let resp = egui::Modal::new(Id::unique("iv-dialog")).show(ctx, |ui| {
+        ui.set_width(420.0);
+        ui.label(RichText::new(format!("'{}' 폴더를 휴지통으로 옮길까요?", name_of(path))).size(15.0).strong());
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(RichText::new(path.display().to_string()).size(12.0).color(Color32::from_gray(150))).wrap());
+        ui.add_space(8.0);
+        let what = format!("안에 파일 {}개 · 폴더 {}개 · {}", c.files, c.folders, iv_viewer::human_bytes(c.bytes));
+        let line = if c.done { what } else { format!("세는 중…  {what}") };
+        ui.label(RichText::new(line).size(13.0));
+        ui.label(RichText::new("사진이 아닌 파일도 모두 함께 옮겨집니다. 휴지통에서 되살릴 수 있습니다.").size(12.0).color(Color32::from_gray(150)));
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            let cancel = ui.button("취소");
+            if d.fresh {
+                d.fresh = false;
+                cancel.request_focus();
+            }
+            if cancel.clicked() {
+                result = DialogResult::Cancel;
+            }
+            let ok = egui::Button::new(RichText::new("휴지통으로 이동").color(Color32::WHITE)).fill(Color32::from_rgb(190, 60, 55));
+            if ui.add(ok).clicked() {
+                result = DialogResult::Done(d.action(String::new()));
+            }
+        });
     });
     if matches!(result, DialogResult::Open) && (resp.should_close() || ctx.input(|i| i.key_pressed(egui::Key::Escape))) {
         result = DialogResult::Cancel;

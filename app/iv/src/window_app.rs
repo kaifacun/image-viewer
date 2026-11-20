@@ -91,10 +91,19 @@ struct App {
     tree_rows: Vec<iv_fstree::Row>,
     tree_counts: Vec<Option<(u32, u32)>>,
     tree_rows_at: Option<Instant>,
+    /// 방금 펼친 트리 폴더 — 우선 스캔에서 그 자식을 맨 앞에
+    tree_first: Option<PathBuf>,
+    /// 폴더 색인 파일(스캔 결과 저장) 경로와 마지막으로 잰 용량·시각 (상태줄)
+    index_path: Option<PathBuf>,
+    index_size: Option<(Instant, Option<u64>)>,
     /// 사용자가 트리를 바꿈 (펼침·폴더 이동) — 바로 다시 만든다
     tree_dirty: bool,
     /// 사용자가 만들거나 이름을 바꾼 폴더 — 비어 있어도 숨기지 않는다
     keep_visible: HashSet<PathBuf>,
+    /// 트리 줄마다 폴더 휴지통을 막는 이유 (트리를 다시 만들 때 함께)
+    tree_trash_block: Vec<Option<&'static str>>,
+    /// 열린 폴더를 휴지통으로 못 보내는 이유 (폴더가 바뀔 때 다시)
+    dir_trash_block: Option<(PathBuf, Option<&'static str>)>,
     /// 잘라낸 파일들과 그때의 클립보드 변경 번호 — 붙여넣을 때 클립보드가 그대로면 옮기고, 아니면 복사
     cut_paths: HashSet<PathBuf>,
     cut_count: i64,
@@ -198,6 +207,11 @@ impl App {
             tree_rows_at: None,
             tree_dirty: true,
             keep_visible: HashSet::new(),
+            tree_trash_block: Vec::new(),
+            tree_first: None,
+            index_path: iv_thumbs::default_cache_dir().map(|d| d.join("scan-v1.tsv")),
+            index_size: None,
+            dir_trash_block: None,
             cut_paths: HashSet::new(),
             groups,
             cut_count: 0,
@@ -250,6 +264,8 @@ impl App {
                 // 실패 기록은 폴더 단위로 잊는다 (누적 방지 · 돌아오면 한 번 더 시도)
                 self.thumbs.forget_failures();
                 self.textures_dir = dir.clone();
+                // 새로 연 폴더의 하위부터 먼저 훑게
+                self.tree_first = dir.clone();
             }
             self.last_requested.clear();
             if let Some(d) = &dir {
@@ -682,8 +698,12 @@ impl App {
             FileOp::Paste { dest } => return self.paste(dest.clone(), el),
             _ => {}
         }
+        if let FileOp::TrashFolder { path, ident } = &op {
+            return self.trash_folder(path.clone(), *ident, el);
+        }
         let target = match &op {
             FileOp::NewFolder { parent, .. } => parent.join("x"),
+            FileOp::TrashFolder { path, .. } => path.clone(),
             FileOp::RenameFolder { path, .. } | FileOp::RenameFile { path, .. } | FileOp::Rotate { path, .. } => path.clone(),
             FileOp::MoveTo { dest } | FileOp::Paste { dest } => dest.clone(),
             FileOp::RotateMarked { .. } => PathBuf::new(),
@@ -695,7 +715,7 @@ impl App {
                 FileOp::NewFolder { parent, name } => iv_fsops::create_folder(parent, name),
                 FileOp::RenameFolder { path, name } | FileOp::RenameFile { path, name } => iv_fsops::rename(path, name),
                 FileOp::Rotate { path, quarters } => rotate_file(path, *quarters),
-                FileOp::MoveTo { .. } | FileOp::RotateMarked { .. } | FileOp::Paste { .. } => Err("내부 오류".to_string()),
+                FileOp::MoveTo { .. } | FileOp::RotateMarked { .. } | FileOp::Paste { .. } | FileOp::TrashFolder { .. } => Err("내부 오류".to_string()),
             }
         };
         match (&op, &result) {
@@ -715,12 +735,157 @@ impl App {
             (FileOp::RenameFile { path, .. }, Ok(p)) => log::info!("이름 바꿈: {} → {}", path.display(), p.display()),
             (FileOp::Rotate { quarters, .. }, Ok(p)) => log::info!("돌려 저장 ({}°): {}", *quarters as u32 * 90, p.display()),
             (_, Err(e)) => log::warn!("파일 작업 실패: {e}"),
-            (FileOp::MoveTo { .. } | FileOp::RotateMarked { .. } | FileOp::Paste { .. }, Ok(_)) => {}
+            (FileOp::MoveTo { .. } | FileOp::RotateMarked { .. } | FileOp::Paste { .. } | FileOp::TrashFolder { .. }, Ok(_)) => {}
         }
         self.tree_dirty = true;
         let fx = self.viewer.on_file_op(&op, &result, &self.loader);
         self.apply(fx, el);
     }
+    //#region 창 초점 키보드 — Tab 으로 트리 ↔ 격자, 트리에 초점이 있으면 방향키는 폴더 이동
+    /// 처리했으면 true (앱 단축키로 넘기지 않음). 브라우저 모드·글 입력 아닐 때만.
+    fn pane_key(&mut self, key: &winit::keyboard::Key, mods: ModifiersState, el: &ActiveEventLoop) -> bool {
+        use iv_ui::browser::Pane;
+        use winit::keyboard::{Key, NamedKey};
+        if self.viewer.mode != Mode::Browse || self.browser.dialog.is_some() || self.text_editing() {
+            return false;
+        }
+        let plain = !(mods.super_key() || mods.control_key() || mods.alt_key());
+        let Key::Named(k) = key else { return false };
+        if *k == NamedKey::Tab && plain {
+            self.browser.focus = if self.browser.focus == Pane::Tree { Pane::Grid } else { Pane::Tree };
+            if self.browser.focus == Pane::Tree {
+                self.browser.tree_reveal = true;
+            }
+            self.redraw();
+            return true;
+        }
+        if self.browser.focus != Pane::Tree || !plain || mods.shift_key() {
+            return false;
+        }
+        let rows = &self.tree_rows;
+        if rows.is_empty() {
+            return false;
+        }
+        let cur = self.viewer.library.dir().and_then(|d| rows.iter().position(|r| r.path == d));
+        let open = |i: usize| rows[i].path.clone();
+        let target: Option<PathBuf> = match k {
+            NamedKey::ArrowDown => Some(open(cur.map_or(0, |i| (i + 1).min(rows.len() - 1)))),
+            NamedKey::ArrowUp => Some(open(cur.map_or(0, |i| i.saturating_sub(1)))),
+            NamedKey::Home => Some(open(0)),
+            NamedKey::End => Some(open(rows.len() - 1)),
+            NamedKey::ArrowRight => {
+                let Some(i) = cur else { return true };
+                let r = &rows[i];
+                // 접혀 있으면 펼치고, 펼쳐져 있으면 첫 하위로 (줄 목록이 한 프레임 늦을 수 있어 펼침 상태는 트리에 묻는다)
+                if !self.tree.is_expanded(&r.path) {
+                    if r.has_children {
+                        let p = r.path.clone();
+                        self.after_browser_toggle(p);
+                    }
+                    None
+                } else {
+                    rows.get(i + 1).filter(|n| n.depth > r.depth).map(|n| n.path.clone())
+                }
+            }
+            NamedKey::ArrowLeft => {
+                let Some(i) = cur else { return true };
+                let r = &rows[i];
+                if self.tree.is_expanded(&r.path) && r.depth > 0 {
+                    let p = r.path.clone();
+                    self.after_browser_toggle(p);
+                    None
+                } else {
+                    // 부모 줄로 (위로 올라가며 깊이가 얕은 첫 줄)
+                    rows[..i].iter().rposition(|n| n.depth < r.depth).map(|j| rows[j].path.clone())
+                }
+            }
+            // Enter: 격자로 초점을 넘긴다 (사진 고르기 시작)
+            NamedKey::Enter => {
+                self.browser.focus = Pane::Grid;
+                self.redraw();
+                return true;
+            }
+            // ⌫·Delete: 트리에선 사진이 아니라 열린 폴더를 휴지통으로 (모든 파일 보기에서만 확인 창)
+            NamedKey::Backspace | NamedKey::Delete => {
+                let Some(d) = self.viewer.library.dir().map(Path::to_path_buf) else { return true };
+                if !self.viewer.all_files() {
+                    let fx = self.viewer.say("폴더는 \"모든 파일\" 보기(⌘4)에서만 휴지통으로 보낼 수 있습니다");
+                    self.apply(fx, el);
+                } else if let Some(why) = iv_fsops::folder_trash_block(&d, &self.tree.root_paths(), &trash_protected()) {
+                    let fx = self.viewer.say(why);
+                    self.apply(fx, el);
+                } else {
+                    self.browser.dialog = Some(iv_ui::dialog::Dialog::trash_folder(d));
+                    self.redraw();
+                }
+                return true;
+            }
+            _ => return false,
+        };
+        if let Some(p) = target {
+            if self.viewer.library.dir() != Some(p.as_path()) {
+                self.handle(Action::OpenFolder(p), el);
+            }
+            self.browser.tree_reveal = true;
+        }
+        self.redraw();
+        true
+    }
+
+    fn after_browser_toggle(&mut self, p: PathBuf) {
+        self.tree_first = Some(p.clone());
+        self.tree.toggle(&p);
+        self.tree_dirty = true;
+        self.browser.tree_reveal = true;
+    }
+
+    /// egui 글 입력 칸(경로 줄·이름 칸)에 초점이 있는가
+    fn text_editing(&self) -> bool {
+        self.gfx.as_ref().and_then(|g| g.egui.as_ref()).is_some_and(|(ctx, _)| ctx.text_edit_focused())
+    }
+
+    fn redraw(&self) {
+        if let Some(g) = &self.gfx {
+            g.window.request_redraw();
+        }
+    }
+    //#endregion
+
+    //#region 폴더 휴지통 — 금지 판정·같은 폴더인지(dev+ino) 다시 확인한 뒤 OS 휴지통으로. 실패해도 지우기로 대신하지 않는다
+    fn trash_folder(&mut self, path: PathBuf, ident: Option<(u64, u64)>, el: &ActiveEventLoop) {
+        let op = FileOp::TrashFolder { path: path.clone(), ident };
+        let check = || -> Result<(), String> {
+            if self.selftest.is_some() && std::env::var_os("IV_TRASH_DIR").is_none() {
+                return Err("자가 시험은 IV_TRASH_DIR 없이 폴더를 지우지 않음".into());
+            }
+            if !self.selftest_allows(&path) {
+                return Err("시험 루트 밖".into());
+            }
+            if let Some(why) = iv_fsops::folder_trash_block(&path, &self.tree.root_paths(), &trash_protected()) {
+                return Err(why.to_string());
+            }
+            // 확인 창을 연 뒤 다른 것으로 바뀌었으면(이름 바꿔 놓고 같은 이름으로 다른 폴더·링크) 거부
+            if ident.is_none() || iv_ui::dialog::folder_ident(&path) != ident {
+                return Err("확인한 뒤 폴더가 바뀌었습니다 — 다시 시도하세요".into());
+            }
+            Ok(())
+        };
+        let result = check().and_then(|()| iv_trash::trash(&path).map(|()| path.clone()));
+        match &result {
+            Ok(_) => {
+                log::info!("폴더 휴지통: {}", path.display());
+                self.tree.removed(&path);
+                self.keep_visible.retain(|k| !k.starts_with(&path));
+                self.cut_paths.retain(|k| !k.starts_with(&path));
+                self.tree_dirty = true;
+            }
+            Err(e) => log::warn!("폴더 휴지통 실패 {}: {e}", path.display()),
+        }
+        let fx = self.viewer.on_file_op(&op, &result, &self.loader);
+        self.apply(fx, el);
+    }
+    //#endregion
+
     //#region 일괄 회전·클립보드
     /// 선택한 사진들을 돌려 저장 (방향 태그만)
     fn rotate_marked(&mut self, quarters: u8, el: &ActiveEventLoop) {
@@ -1061,12 +1226,31 @@ impl App {
                 let open_dir = lib.dir();
                 let scanner = &self.scanner;
                 let keep = &self.keep_visible;
-                let show_all = self.browser.show_empty_folders;
+                let show_all = self.browser.show_empty_folders || self.viewer.all_files();
                 // 필터 = 고른 확장자가 든 묶음들, 필터 없음 = 사진 묶음 전부 (모드의 전체 — 나중 비디오 묶음은 빠진다)
                 let mask = tree_mask(&self.groups, &self.viewer);
                 let hide = |p: &Path| !show_all && open_dir.is_none_or(|d| !d.starts_with(p)) && !keep.iter().any(|k| k.starts_with(p)) && scanner.verdict_for(p, mask) == Verdict::Empty;
                 self.tree_rows = self.tree.visible_rows_where(&hide);
                 self.tree_counts = self.tree_rows.iter().map(|r| scanner.counts_for(&r.path, mask)).collect();
+                //#region 폴더 휴지통 금지 이유 — "모든 파일" 보기에서만 쓰므로 그때만 판정 (파일 시스템 조회)
+                let (roots, protected) = (self.tree.root_paths(), trash_protected());
+                self.tree_trash_block = if self.viewer.all_files() { self.tree_rows.iter().map(|r| iv_fsops::folder_trash_block(&r.path, &roots, &protected)).collect() } else { Vec::new() };
+                self.dir_trash_block = None;
+                //#endregion
+                //#region 우선 스캔 — 아직 모르는 보이는 줄을 깊은 것부터 (방금 펼친·연 폴더의 자식이 맨 앞)
+                if !self.scanner.status().done && !show_all {
+                    let first = self.tree_first.take();
+                    let mut want: Vec<(usize, &Path)> = self
+                        .tree_rows
+                        .iter()
+                        .zip(&self.tree_counts)
+                        .filter(|(r, c)| c.is_none() && r.depth > 0 && r.root.is_none())
+                        .map(|(r, _)| (r.depth, r.path.as_path()))
+                        .collect();
+                    want.sort_by_key(|(d, p)| (first.as_deref().is_none_or(|f| p.parent() != Some(f)), std::cmp::Reverse(*d)));
+                    self.scanner.prioritize(want.into_iter().take(64).map(|(_, p)| p.to_path_buf()).collect());
+                }
+                //#endregion
                 self.tree_rows_at = Some(Instant::now());
                 self.tree_dirty = false;
             }
@@ -1077,6 +1261,22 @@ impl App {
             let kind_groups: Vec<iv_core::formats::FormatGroup> = self.groups.iter().filter(|g| g.kind == kind).cloned().collect();
             //#endregion
             let cur = lib.current().map(|e| e.id.0);
+            //#region 열린 폴더 휴지통 금지 이유 — 폴더가 바뀔 때만 다시 판정
+            if self.viewer.all_files() {
+                if let Some(d) = lib.dir() {
+                    if self.dir_trash_block.as_ref().is_none_or(|(p, _)| p != d) {
+                        self.dir_trash_block = Some((d.to_path_buf(), iv_fsops::folder_trash_block(d, &self.tree.root_paths(), &trash_protected())));
+                    }
+                }
+            }
+            // 폴더 색인 용량 — 2초에 한 번만 잰다 (저장은 스캔 중·10초마다 바뀐다)
+            if self.index_size.is_none_or(|(t, _)| t.elapsed() >= Duration::from_secs(2)) {
+                let size = self.index_path.as_ref().and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len());
+                self.index_size = Some((Instant::now(), size));
+            }
+            let index_file = self.index_path.as_deref().map(|p| (p, self.index_size.and_then(|(_, s)| s)));
+            let dir_block = self.dir_trash_block.as_ref().filter(|(p, _)| Some(p.as_path()) == lib.dir()).and_then(|(_, b)| *b);
+            //#endregion
             let model = BrowserModel {
                 entries: lib.entries(),
                 selected: (!lib.is_empty()).then(|| lib.index()),
@@ -1094,6 +1294,14 @@ impl App {
                 codec_engine: codec_src,
                 filter: self.viewer.filter(),
                 preview_has_frame: self.viewer.shown.as_ref().is_some_and(|s| Some(s.key) == cur),
+                all_files: self.viewer.all_files(),
+                scan_done: self.scanner.status().done,
+                show_all_folders: self.browser.show_empty_folders || self.viewer.all_files(),
+                decodable: &|e| self.viewer.decodable(e),
+                entry_kind: &|e| self.viewer.entry_kind(e),
+                tree_trash_block: &self.tree_trash_block,
+                dir_trash_block: dir_block,
+                index_file,
             };
             let browser = &mut self.browser;
             let prompt = self.codec_prompt;
@@ -1156,6 +1364,9 @@ impl App {
                 g.window.request_redraw();
             }
             ui_actions.extend(b.actions);
+            if b.reveal_index {
+                reveal_index(self.index_path.as_deref(), self.selftest.is_some());
+            }
             if let Some(t) = b.copy_text {
                 let r = clip_ok(self.selftest.is_some()).and_then(|()| iv_clipboard::write_text(&t)).map(|_| format!("경로 복사함: {t}"));
                 let _ = self.viewer.on_clipboard(r);
@@ -1171,6 +1382,7 @@ impl App {
     fn after_browser(&mut self, toggle: Option<PathBuf>, visible: std::ops::Range<usize>, area: Option<[f32; 4]>, cols: usize, rows: usize, window: &Window) {
         let mut redraw = false;
         if let Some(p) = toggle {
+            self.tree_first = Some(p.clone());
             self.tree.toggle(&p);
             self.tree_dirty = true;
             redraw = true;
@@ -1187,9 +1399,11 @@ impl App {
         // 보이는 항목 키 목록이 바뀌었을 때만 요청 (스크롤·정렬·열 수·폴더 변경을 한 규칙으로)
         let entries = self.viewer.library.entries();
         let vis = &entries[visible.start.min(entries.len())..visible.end.min(entries.len())];
+        // "모든 파일" 보기의 볼 수 없는 파일은 썸네일을 만들지 않는다 (요청 키에서도 빼야 '모두 채워짐'이 성립)
+        let vis: Vec<&iv_library::Entry> = vis.iter().filter(|e| self.viewer.decodable(e) || !self.viewer.all_files()).collect();
         let keys: Vec<u64> = vis.iter().map(|e| e.id.0).collect();
         // 메모리 캐시에 있는 것은 바로 텍스처로
-        for e in vis {
+        for e in &vis {
             let k = e.id.0;
             if !self.browser.textures.has(k) {
                 if let Some(t) = self.thumbs.get(k) {
@@ -1367,8 +1581,10 @@ impl App {
                     }
                     Some(k) => {
                         let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
-                        if let Some(a) = input::key_action(&k, mods, fullscreen, self.viewer.mode, self.viewer.kind()) {
-                            self.handle(a, el);
+                        if !self.pane_key(&k, mods, el) {
+                            if let Some(a) = input::key_action(&k, mods, fullscreen, self.viewer.mode, self.viewer.kind()) {
+                                self.handle(a, el);
+                            }
                         }
                     }
                     None => log::warn!("자가 시험: 알 수 없는 키 {name}"),
@@ -1577,6 +1793,10 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             // 이름 입력 창이 열려 있으면 앱 단축키를 쓰지 않는다 (Tab 으로 입력 칸을 벗어나도 ⌫·Delete 가 새지 않게)
             WindowEvent::KeyboardInput { .. } if self.browser.dialog.is_some() => {}
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && self.pane_key(&event.logical_key, self.mods, el) => {
+                // 반복 입력은 트리 이동만 (Tab·⌫ 는 한 번만)
+                let _ = event.repeat;
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
                 if let Some(a) = input::key_action(&event.logical_key, self.mods, fullscreen, self.viewer.mode, self.viewer.kind()) {
@@ -1664,6 +1884,32 @@ fn rotate_file(path: &std::path::Path, quarters: u8) -> Result<PathBuf, String> 
     let current = iv_rotate::read_orientation(path).ok_or("사진 방향을 읽지 못함")?;
     iv_rotate::save_orientation(path, current.rotated_quarters(quarters))?;
     Ok(path.to_path_buf())
+}
+
+/// 폴더 색인 파일을 Finder 에서 보여 준다 (아직 저장 전이면 그 폴더를 연다). 자가 시험에선 열지 않는다.
+fn reveal_index(path: Option<&Path>, selftest: bool) {
+    let Some(p) = path else { return };
+    if selftest {
+        log::info!("자가 시험: Finder 열기 생략 {}", p.display());
+        return;
+    }
+    let r = if p.exists() {
+        std::process::Command::new("open").arg("-R").arg(p).spawn()
+    } else {
+        std::process::Command::new("open").arg(p.parent().unwrap_or(p)).spawn()
+    };
+    if let Err(e) = r {
+        log::warn!("Finder 열기 실패: {e}");
+    }
+}
+
+/// 폴더 휴지통이 건드리면 안 되는 앱 폴더 (조상·자신 금지): 캐시, 시험 휴지통, 사용자 휴지통
+fn trash_protected() -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = iv_thumbs::default_cache_dir().into_iter().collect();
+    v.extend(std::env::var_os("IV_CACHE_DIR").map(PathBuf::from));
+    v.extend(std::env::var_os("IV_TRASH_DIR").map(PathBuf::from));
+    v.extend(std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".Trash")));
+    v
 }
 
 fn file_name(p: &Path) -> String {

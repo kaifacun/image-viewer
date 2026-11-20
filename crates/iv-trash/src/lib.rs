@@ -12,7 +12,19 @@ fn test_dir() -> Option<std::path::PathBuf> {
 fn move_to_dir(path: &Path, dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let name = path.file_name().ok_or("파일 이름 없음")?;
-    std::fs::rename(path, dir.join(name)).map_err(|e| e.to_string())
+    // 같은 이름이 있으면 "이름 2", "이름 3"… 으로 피한다 (덮어쓰기 금지)
+    let mut dest = dir.join(name);
+    let mut n = 2;
+    while dest.symlink_metadata().is_ok() {
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let new = match path.extension() {
+            Some(ext) if path.is_file() => format!("{stem} {n}.{}", ext.to_string_lossy()),
+            _ => format!("{} {n}", name.to_string_lossy()),
+        };
+        dest = dir.join(new);
+        n += 1;
+    }
+    std::fs::rename(path, dest).map_err(|e| e.to_string())
 }
 //#endregion
 
@@ -54,6 +66,28 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_to_dir_avoids_name_collisions() {
+        let base = std::env::temp_dir().join(format!("iv-trash-coll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("bin");
+        for i in 0..3 {
+            let src = base.join(format!("src{i}"));
+            std::fs::create_dir_all(&src).unwrap();
+            std::fs::write(src.join("a.jpg"), format!("{i}")).unwrap();
+            std::fs::create_dir_all(src.join("folder")).unwrap();
+            std::fs::write(src.join("folder/in.txt"), format!("{i}")).unwrap();
+            move_to_dir(&src.join("a.jpg"), &dir).unwrap();
+            move_to_dir(&src.join("folder"), &dir).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(dir.join("a.jpg")).unwrap(), "0");
+        assert_eq!(std::fs::read_to_string(dir.join("a 2.jpg")).unwrap(), "1");
+        assert_eq!(std::fs::read_to_string(dir.join("a 3.jpg")).unwrap(), "2");
+        assert_eq!(std::fs::read_to_string(dir.join("folder 3/in.txt")).unwrap(), "2");
+        assert!(dir.join("folder 2").is_dir() && dir.join("folder").is_dir());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn missing_file_errors_and_never_panics() {

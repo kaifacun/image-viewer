@@ -138,11 +138,23 @@ pub struct BrowserState {
     pub inspector: bool,
     /// 경로 표시를 글로 고쳐 쓰는 중 (경로 칸을 누르면)
     path_editing: bool,
+    /// 키보드가 움직이는 창 (폴더 트리 ↔ 격자). 누른 창으로, Tab 으로 바뀐다
+    pub focus: Pane,
+    /// 다음 프레임에 트리의 열린 폴더 줄이 보이도록 스크롤 (키보드 이동 뒤 한 번)
+    pub tree_reveal: bool,
+}
+
+/// 키보드 초점이 있는 창
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pane {
+    Tree,
+    #[default]
+    Grid,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { textures: ThumbTextures::default(), scroll_to: None, tile: 128.0, path_edit: String::new(), path_edit_for: None, last_view: None, last_visible: 0..0, dialog: None, show_empty_folders: false, marquee: None, inspector: true, path_editing: false }
+        Self { textures: ThumbTextures::default(), scroll_to: None, tile: 128.0, path_edit: String::new(), path_edit_for: None, last_view: None, last_visible: 0..0, dialog: None, show_empty_folders: false, marquee: None, inspector: true, path_editing: false, focus: Pane::Grid, tree_reveal: false }
     }
 }
 
@@ -196,6 +208,22 @@ pub struct BrowserModel<'a> {
     pub filter: Option<&'a HashSet<&'static str>>,
     /// 미리보기 칸에 렌더러가 실제 프레임을 그리는가 (아니면 썸네일로 대신 채움)
     pub preview_has_frame: bool,
+    /// "모든 파일" 보기 (격자에 모든 파일, 트리에 모든 폴더, 폴더 휴지통 가능)
+    pub all_files: bool,
+    /// 첫 폴더 스캔이 끝났는가 (아니면 확인 전 폴더를 흐리게)
+    pub scan_done: bool,
+    /// 트리가 사진 없는 폴더도 숨기지 않는가 ("모든 파일" 또는 보기 설정)
+    pub show_all_folders: bool,
+    /// 항목이 등록된 형식인가 (아니면 썸네일 대신 파일 아이콘)
+    pub decodable: &'a dyn Fn(&Entry) -> bool,
+    /// 항목의 종류 ("모든 파일" 보기에서 비디오 표식 등)
+    pub entry_kind: &'a dyn Fn(&Entry) -> Option<iv_core::formats::MediaKind>,
+    /// 트리 줄마다 폴더 휴지통을 막는 이유 (None = 가능)
+    pub tree_trash_block: &'a [Option<&'static str>],
+    /// 열린 폴더를 휴지통으로 보내지 못하는 이유 (None = 가능)
+    pub dir_trash_block: Option<&'static str>,
+    /// 폴더 색인(스캔 결과 저장 파일): (경로, 용량 — 아직 저장 전이면 None)
+    pub index_file: Option<(&'a Path, Option<u64>)>,
 }
 
 #[derive(Default)]
@@ -207,6 +235,8 @@ pub struct BrowserOut {
     pub tree_toggle: Option<PathBuf>,
     /// 트리 표시 설정이 바뀜 (다시 만들어야 함)
     pub tree_changed: bool,
+    /// 폴더 색인 파일을 Finder 에서 보여 달라 (앱이 연다)
+    pub reveal_index: bool,
     /// 썸네일을 요청할 항목 범위 (보이는 줄 ±2줄)
     pub visible: Range<usize>,
     /// 미리보기 칸 (점 단위, 화면 좌표)
@@ -237,6 +267,25 @@ pub fn draw(ctx: &egui::Context, st: &mut BrowserState, m: &BrowserModel<'_>) ->
                 ui.horizontal(|ui| {
                     // 오른쪽(스캔 상태)을 먼저 놓고 남은 폭에 왼쪽 글을 한 줄로 (넘치면 말줄임)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        //#region 폴더 색인 — 용량 + Finder 에서 보기 아이콘 (맨 오른쪽)
+                        if let Some((path, size)) = m.index_file {
+                            let tip = format!("폴더 색인 파일을 Finder 에서 보기\n{}", path.display());
+                            let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+                            if resp.hovered() {
+                                ui.painter().rect_filled(r, CornerRadius::same(4), theme::HOVER);
+                            }
+                            crate::icons::paint(ui.painter(), Icon::Folder, r.shrink(2.5), if resp.hovered() { theme::ACCENT } else { theme::TEXT_DIM });
+                            if resp.on_hover_text(&tip).clicked() {
+                                out.reveal_index = true;
+                            }
+                            let label = match size {
+                                Some(b) => format!("색인 {}", iv_viewer::human_bytes(b)),
+                                None => "색인 저장 전".to_string(),
+                            };
+                            ui.label(RichText::new(label).size(theme::FONT_SMALL).color(theme::TEXT_FAINT)).on_hover_text(&tip);
+                            ui.add_space(10.0);
+                        }
+                        //#endregion
                         ui.label(RichText::new(m.scan_status).size(theme::FONT_SMALL).color(theme::TEXT_FAINT));
                         ui.add_space(16.0);
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
@@ -329,6 +378,11 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
             if ui.add_enabled(!m.marked.is_empty(), egui::Button::new(trash_label(m)).shortcut_text("⌘⌫")).clicked() {
                 out.actions.push(Action::Trash);
             }
+            if let Some(d) = m.dir {
+                if folder_trash_item(ui, st, m, d, m.dir_trash_block, "이 폴더를 휴지통으로…") {
+                    ui.close();
+                }
+            }
             ui.separator();
             if ui.add(egui::Button::new("끝내기").shortcut_text("⌘Q")).clicked() {
                 out.actions.push(Action::Quit);
@@ -338,7 +392,7 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
             let some = !m.marked.is_empty();
             clip_items(ui, some, m.dir.is_some(), None, out);
             ui.separator();
-            if m.kind == iv_core::formats::MediaKind::Image {
+            if m.kind == iv_core::formats::MediaKind::Image && !m.all_files {
                 rotate_items(ui, some, out);
                 ui.separator();
             }
@@ -365,7 +419,11 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
             }
             ui.separator();
             //#endregion
-            if ui.checkbox(&mut st.show_empty_folders, "사진 없는 폴더도 보이기").changed() {
+            let mut all = m.all_files;
+            if ui.checkbox(&mut all, "모든 파일 보기").on_hover_text("격자에 폴더의 모든 파일, 트리에 모든 폴더 — 이 보기에서 폴더를 휴지통으로 보낼 수 있습니다 (⌘4)").changed() {
+                out.actions.push(Action::SetAllFiles(all));
+            }
+            if ui.add_enabled_ui(!m.all_files, |ui| ui.checkbox(&mut st.show_empty_folders, "사진 없는 폴더도 보이기")).inner.changed() {
                 out.tree_changed = true;
             }
             ui.separator();
@@ -456,10 +514,21 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
             }
             toolbar_sep(ui);
             let some = !m.marked.is_empty();
+            //#region "모든 파일" 보기: 열린 폴더를 휴지통으로 (막히면 이유를 툴팁으로)
+            if m.all_files {
+                if let Some(d) = m.dir {
+                    let tip = m.dir_trash_block.unwrap_or("이 폴더를 휴지통으로 (안의 모든 파일·폴더 포함)");
+                    let b = ui.add_enabled(m.dir_trash_block.is_none(), egui::Button::new(RichText::new("폴더 삭제").size(theme::FONT_SMALL)));
+                    if b.on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
+                        st.dialog = Some(Dialog::trash_folder(d.to_path_buf()));
+                    }
+                }
+            }
+            //#endregion
             if icon_button(ui, Icon::Trash, "휴지통으로 이동 (⌘⌫)", some, false).clicked() {
                 out.actions.push(Action::Trash);
             }
-            if m.kind == MediaKind::Image {
+            if m.kind == MediaKind::Image && !m.all_files {
                 if icon_button(ui, Icon::RotateRight, "오른쪽으로 90° 돌려 저장", some, false).clicked() {
                     out.actions.push(Action::RotateMarked(1));
                 }
@@ -478,7 +547,8 @@ fn toolbar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: 
             let (cur, asc) = m.sort;
             let name = SORTS.iter().find(|(k, _)| *k == cur).map(|(_, n)| *n).unwrap_or("");
             egui::ComboBox::from_id_salt("iv-sort").width(118.0).selected_text(format!("{name} {}", if asc { "↑" } else { "↓" })).show_ui(ui, |ui| sort_items(ui, m, out)).response.on_hover_text("정렬");
-            filter_menu(ui, m, out);
+            // "모든 파일" 보기엔 형식 필터가 없다
+            ui.add_enabled_ui(!m.all_files, |ui| filter_menu(ui, m, out));
             toolbar_sep(ui);
             if icon_button(ui, Icon::Copy, &copy_path_tip(m), m.dir.is_some(), false).clicked() {
                 out.actions.push(Action::CopyPath);
@@ -513,7 +583,7 @@ fn segmented_kind(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut)
     egui::Frame::new().fill(theme::BG_CANVAS).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(2)).show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         for (i, k) in iv_core::formats::MediaKind::ALL.into_iter().enumerate() {
-            let on = m.kind == k;
+            let on = m.kind == k && !m.all_files;
             let icon = match k {
                 iv_core::formats::MediaKind::Image => Icon::Photo,
                 iv_core::formats::MediaKind::Video => Icon::Video,
@@ -531,6 +601,19 @@ fn segmented_kind(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut)
                 out.actions.push(Action::SetKind(k));
             }
         }
+        //#region 네 번째 칸 — 모든 파일 (폴더 정리용)
+        let on = m.all_files;
+        let galley = ui.painter().layout_no_wrap("모든 파일".to_string(), FontId::proportional(theme::FONT_BODY), Color32::WHITE);
+        let (r, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x + 40.0, 26.0), Sense::click());
+        let bg = if on { theme::ACCENT_BG } else if resp.hovered() { theme::HOVER } else { Color32::TRANSPARENT };
+        ui.painter().rect_filled(r, CornerRadius::same(6), bg);
+        let fg = if on { Color32::WHITE } else { theme::TEXT_DIM };
+        crate::icons::paint(ui.painter(), Icon::Folder, Rect::from_center_size(Pos2::new(r.min.x + 17.0, r.center().y), Vec2::splat(14.0)), fg);
+        ui.painter().galley(Pos2::new(r.min.x + 30.0, r.center().y - galley.size().y / 2.0), galley, fg);
+        if resp.on_hover_text("모든 파일 보기 (⌘4) — 사진이 아닌 파일·빈 폴더도 보이고, 폴더를 휴지통으로 보낼 수 있습니다").clicked() && !on {
+            out.actions.push(Action::SetAllFiles(true));
+        }
+        //#endregion
     });
 }
 
@@ -640,8 +723,45 @@ fn filter_menu(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
 }
 //#endregion
 
+/// "폴더를 휴지통으로…" 메뉴 항목 — "모든 파일" 보기가 아니거나 막힌 폴더면 비활성 + 이유. 눌렀으면 true.
+fn folder_trash_item(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, path: &Path, block: Option<&'static str>, label: &str) -> bool {
+    let why = if !m.all_files { Some("\"모든 파일\" 보기(⌘4)에서만 폴더를 휴지통으로 보낼 수 있습니다") } else { block };
+    let b = ui.add_enabled(why.is_none(), egui::Button::new(label));
+    let b = match why {
+        Some(w) => b.on_disabled_hover_text(w),
+        None => b.on_hover_text("안의 모든 파일·폴더를 함께 휴지통으로 옮깁니다"),
+    };
+    if b.clicked() {
+        st.dialog = Some(Dialog::trash_folder(path.to_path_buf()));
+        return true;
+    }
+    false
+}
+
+/// 이 창 안을 누르면 키보드 초점을 이 창으로 + 초점 있는 창에 옅은 강조 테두리
+fn pane_focus(ui: &egui::Ui, st: &mut BrowserState, pane: Pane) {
+    let rect = ui.max_rect();
+    let pressed = ui.input(|i| (i.pointer.primary_pressed() || i.pointer.secondary_pressed()) && i.pointer.interact_pos().is_some_and(|p| rect.contains(p)));
+    if pressed {
+        st.focus = pane;
+    }
+    if st.focus == pane {
+        ui.painter().rect_stroke(rect.shrink(1.0), CornerRadius::ZERO, Stroke::new(1.5, theme::ACCENT.gamma_multiply(0.55)), StrokeKind::Inside);
+    }
+}
+
 fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+    pane_focus(ui, st, Pane::Tree);
+    let tree_focused = st.focus == Pane::Tree;
     ui.add_space(4.0);
+    //#region 첫 스캔 중 안내 — 흐린 폴더는 사진이 있는지 아직 모름 (숨기지 않는 보기에선 의미 없어 생략)
+    if !m.scan_done && !m.show_all_folders {
+        ui.horizontal(|ui| {
+            ui.add_space(12.0);
+            ui.add(egui::Label::new(RichText::new("폴더 확인 중 — 흐린 폴더는 아직 확인 전").size(theme::FONT_CAPTION).color(theme::TEXT_FAINT)).truncate());
+        });
+    }
+    //#endregion
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 1.0;
         let mut section = None;
@@ -672,13 +792,20 @@ fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, o
                 let x0 = row_r.min.x + 4.0 + row.depth as f32 * 14.0;
                 let counted = m.tree_counts.get(k).copied().flatten();
                 let current = m.dir == Some(row.path.as_path());
+                // 아직 하위를 다 훑지 못한 폴더 (사진이 있는지 모름) — 흐리게
+                let pending = counted.is_none() && !m.scan_done && !m.show_all_folders && !current;
                 //#region 펼침 삼각형 — 스캔으로 보일 하위가 없다고 알면 뺀다
                 let arrow_r = Rect::from_min_size(Pos2::new(x0, row_r.center().y - 8.0), Vec2::splat(16.0));
-                let has_arrow = row.has_children && counted.is_none_or(|(_, f)| f > 0);
+                let has_arrow = row.has_children && (m.show_all_folders || counted.is_none_or(|(_, f)| f > 0));
                 let arrow = has_arrow.then(|| ui.interact(arrow_r, ui.scope_id().with("arrow"), Sense::click()));
                 //#endregion
+                // 열린 폴더 줄: 트리에 초점이 있으면 강조색, 아니면 차분한 선택색 (Finder 처럼)
+                if current && st.tree_reveal {
+                    st.tree_reveal = false;
+                    r.scroll_to_me(None);
+                }
                 let bg = if current {
-                    theme::ACCENT_BG
+                    if tree_focused { theme::ACCENT_BG } else { theme::SELECTED_BG }
                 } else if r.hovered() || arrow.as_ref().is_some_and(|a| a.hovered()) {
                     theme::HOVER
                 } else {
@@ -686,7 +813,7 @@ fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, o
                 };
                 let p = ui.painter();
                 p.rect_filled(row_r, CornerRadius::same(5), bg);
-                let fg = if current { Color32::WHITE } else { theme::TEXT };
+                let fg = if current { Color32::WHITE } else if pending { theme::TEXT_FAINT } else { theme::TEXT };
                 if has_arrow {
                     let c = arrow_r.center();
                     let s = 3.5;
@@ -704,9 +831,9 @@ fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, o
                     Some(iv_fstree::RootKind::Disk) => Icon::Disk,
                     _ => Icon::Folder,
                 };
-                crate::icons::paint(p, icon, Rect::from_min_size(Pos2::new(x0 + 18.0, row_r.center().y - 7.0), Vec2::splat(14.0)), if current { Color32::WHITE } else { theme::ACCENT });
+                crate::icons::paint(p, icon, Rect::from_min_size(Pos2::new(x0 + 18.0, row_r.center().y - 7.0), Vec2::splat(14.0)), if current { Color32::WHITE } else if pending { theme::TEXT_FAINT } else { theme::ACCENT });
                 //#region 이름 (말줄임) + 오른쪽 숫자
-                let mut tail = String::new();
+                let mut tail = if pending { "…".to_string() } else { String::new() };
                 if let Some((photos, folders)) = counted {
                     if photos > 0 {
                         tail = format!("{photos}");
@@ -725,6 +852,8 @@ fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, o
                 //#endregion
                 if let Some((photos, folders)) = counted {
                     r.clone().on_hover_text(format!("{} {photos}{} · 하위 폴더 {folders}", m.kind.label(), m.kind.unit()));
+                } else if pending {
+                    r.clone().on_hover_text(format!("{}이(가) 있는지 확인 중", m.kind.label()));
                 }
                 //#region 놓기 — 끌고 있는 사진을 이 폴더로 옮긴다 (열린 폴더 자신은 제외)
                 if !current {
@@ -761,6 +890,11 @@ fn folder_tree(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, o
                     }
                     if ui.button("경로 복사").clicked() {
                         out.copy_text = Some(row.path.display().to_string());
+                        ui.close();
+                    }
+                    ui.separator();
+                    let block = m.tree_trash_block.get(k).copied().flatten();
+                    if folder_trash_item(ui, st, m, &row.path, block, "휴지통으로 이동…") {
                         ui.close();
                     }
                 });
@@ -804,6 +938,7 @@ fn inspector(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out
             }
             None => {
                 let text = match cur {
+                    Some(e) if !(m.decodable)(e) => "미리보기 없음 — 볼 수 없는 형식",
                     Some(e) if m.failed.contains(&e.id.0) => "미리보기를 만들 수 없음",
                     Some(_) => "",
                     None => "미리보기",
@@ -900,10 +1035,12 @@ fn local_offset_secs(_t: i64) -> i64 {
 //#endregion
 
 fn grid(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+    pane_focus(ui, st, Pane::Grid);
     let n = m.entries.len();
     if n == 0 {
         let r = ui.centered_and_justified(|ui| {
             let text = match (m.dir.is_some(), m.filter.is_some()) {
+                (true, _) if m.all_files => "이 폴더에는 파일이 없습니다".to_string(),
                 (true, true) => format!("필터에 맞는 {}이(가) 없습니다 — 위 '필터' 에서 해제할 수 있습니다", m.kind.label()),
                 (true, false) => format!("이 폴더에는 {}이(가) 없습니다", m.kind.label()),
                 _ => "왼쪽에서 폴더를 고르세요".to_string(),
@@ -1130,13 +1267,19 @@ fn draw_tile(painter: &egui::Painter, st: &BrowserState, m: &BrowserModel<'_>, e
         painter.rect_filled(r.translate(Vec2::new(0.0, 1.5)), CornerRadius::same(2), Color32::from_black_alpha(90));
         painter.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), tint);
         //#region 비디오 표시 — 왼쪽 아래 재생 표식
-        if m.kind == iv_core::formats::MediaKind::Video {
+        if m.kind == iv_core::formats::MediaKind::Video && !m.all_files || (m.entry_kind)(e) == Some(iv_core::formats::MediaKind::Video) {
             let b = Rect::from_min_size(Pos2::new(r.min.x + 5.0, r.max.y - 21.0), Vec2::new(24.0, 16.0));
             painter.rect_filled(b, CornerRadius::same(4), Color32::from_black_alpha(170));
             let c = b.center();
             painter.add(egui::Shape::convex_polygon(vec![c + Vec2::new(-3.0, -4.5), c + Vec2::new(5.0, 0.0), c + Vec2::new(-3.0, 4.5)], Color32::WHITE, Stroke::NONE));
         }
         //#endregion
+    } else if !(m.decodable)(e) {
+        // 볼 수 없는 형식 ("모든 파일" 보기) — 파일 아이콘 + 확장자
+        let ic = Rect::from_center_size(img_box.center() - Vec2::new(0.0, 8.0), Vec2::splat((img_box.width() * 0.32).clamp(20.0, 48.0)));
+        crate::icons::paint(painter, Icon::Document, ic, theme::TEXT_FAINT);
+        let ext = e.path().and_then(|p| p.extension()).map(|x| x.to_string_lossy().to_uppercase()).unwrap_or_else(|| "파일".to_string());
+        painter.text(Pos2::new(img_box.center().x, ic.max.y + 6.0), Align2::CENTER_TOP, ext, FontId::proportional(theme::FONT_CAPTION), theme::TEXT_DIM);
     } else if m.failed.contains(&e.id.0) {
         painter.text(img_box.center(), Align2::CENTER_CENTER, "열 수 없음", FontId::proportional(theme::FONT_SMALL), theme::ERROR);
     } else {
@@ -1151,7 +1294,9 @@ fn draw_tile(painter: &egui::Painter, st: &BrowserState, m: &BrowserModel<'_>, e
     let galley = painter.layout_job(job);
     painter.galley(Pos2::new(cell.center().x, cell.min.y + tile + 1.0), galley, name_color);
     // 문서의 썸네일 크기는 의미가 없어 빼고 형식만
-    if m.kind == iv_core::formats::MediaKind::Document {
+    if m.all_files && !(m.decodable)(e) {
+        painter.text(Pos2::new(cell.center().x, cell.min.y + tile + 18.0), Align2::CENTER_TOP, iv_viewer::human_bytes(e.len), FontId::proportional(theme::FONT_CAPTION), if selected { Color32::from_white_alpha(170) } else { theme::TEXT_FAINT });
+    } else if m.kind == iv_core::formats::MediaKind::Document || (m.entry_kind)(e) == Some(iv_core::formats::MediaKind::Document) {
         let ext = e.path().and_then(|p| p.extension()).map(|x| x.to_string_lossy().to_uppercase()).unwrap_or_default();
         painter.text(Pos2::new(cell.center().x, cell.min.y + tile + 18.0), Align2::CENTER_TOP, ext, FontId::proportional(theme::FONT_CAPTION), if selected { Color32::from_white_alpha(170) } else { theme::TEXT_FAINT });
     } else if let Some([w, h]) = st.textures.full_size(e.id.0) {
@@ -1159,7 +1304,9 @@ fn draw_tile(painter: &egui::Painter, st: &BrowserState, m: &BrowserModel<'_>, e
     }
     // 테두리: 선택 = 강조색, 현재 항목(선택 아님) = 옅은 선
     if selected {
-        painter.rect_stroke(cell, CornerRadius::same(8), Stroke::new(if current { 2.0 } else { 1.0 }, theme::ACCENT), StrokeKind::Inside);
+        // 격자에 초점이 없으면 선택 테두리를 차분하게 (키보드가 트리에 있음을 알 수 있게)
+        let c = if st.focus == Pane::Grid { theme::ACCENT } else { theme::TEXT_DIM };
+        painter.rect_stroke(cell, CornerRadius::same(8), Stroke::new(if current { 2.0 } else { 1.0 }, c), StrokeKind::Inside);
     } else if current {
         painter.rect_stroke(cell, CornerRadius::same(8), Stroke::new(1.0, theme::TEXT_FAINT), StrokeKind::Inside);
     }

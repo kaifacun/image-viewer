@@ -83,6 +83,8 @@ pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode,
             ("1", true, _) => Some(Action::SetKind(iv_core::formats::MediaKind::Image)),
             ("2", true, _) => Some(Action::SetKind(iv_core::formats::MediaKind::Video)),
             ("3", true, _) => Some(Action::SetKind(iv_core::formats::MediaKind::Document)),
+            // ⌘4 모든 파일 (폴더 정리 — 이 보기에서만 폴더 휴지통)
+            ("4", true, _) => Some(Action::SetAllFiles(true)),
             // 클립보드: ⌘C 복사 · ⌘X 잘라내기 · ⌘V 붙여넣기 · ⌥⌘C 경로 복사 (⌥ 면 글자가 ç 로 온다, 한글 입력이면 ㅊ·ㅌ·ㅍ)
             ("c" | "C" | "ç" | "Ç" | "ㅊ", true, _) if mods.alt_key() => Some(Action::CopyPath),
             ("c" | "ㅊ", true, _) => Some(Action::Copy),
@@ -128,6 +130,7 @@ pub fn named(name: &str) -> Option<Key> {
         "space" => NamedKey::Space,
         "delete" => NamedKey::Delete,
         "f2" => NamedKey::F2,
+        "tab" => NamedKey::Tab,
         _ => return None,
     }))
 }

@@ -13,7 +13,7 @@
 //! 직접 든 묶음별 수와 "하위 어딘가에 있는 묶음" 비트 표식을 두고, 판정은 조회할 때 표식과 필터를 대조한다
 //! ([`Scanner::verdict_for`]) — 필터를 바꿔도 다시 훑지 않는다.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -231,6 +231,11 @@ struct Shared {
     stop: AtomicBool,
     /// 스캔 후 바뀐 폴더 (정규 경로) — 앱이 가져가 트리·격자를 맞춘다
     changed: Mutex<Vec<PathBuf>>,
+    /// 먼저 훑을 폴더 (정규 경로, **뒤집어 둠** — `pop()` 이 앱이 준 목록의 맨 앞). 첫 훑기 동안만 쓴다.
+    priority: Mutex<Vec<PathBuf>>,
+    /// 시험용: 판정을 공개한 순서
+    #[cfg(test)]
+    order: Mutex<Vec<PathBuf>>,
 }
 
 pub struct Scanner {
@@ -242,7 +247,11 @@ pub struct Scanner {
 impl Scanner {
     /// 스캔 스레드를 띄운다. `wake` 는 진행이 있을 때 (최대 초당 몇 번) 불린다.
     pub fn start(cfg: ScanConfig, wake: impl Fn() + Send + 'static) -> Self {
-        let shared = Arc::new(Shared { verdicts: RwLock::new(HashMap::new()), status: Mutex::new(ScanStatus::default()), stop: AtomicBool::new(false), changed: Mutex::new(Vec::new()) });
+        let shared = Arc::new(Shared { verdicts: RwLock::new(HashMap::new()), status: Mutex::new(ScanStatus::default()), stop: AtomicBool::new(false), changed: Mutex::new(Vec::new()),
+            priority: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            order: Mutex::new(Vec::new()),
+        });
         //#region 루트 정규화 — 별칭 기록, 중복 제거, 깊은 루트부터 (조상 루트가 그 결과를 쓸 수 있게)
         let mut aliases = Vec::new();
         let mut roots: Vec<PathBuf> = Vec::new();
@@ -294,7 +303,7 @@ impl Scanner {
             //#endregion
             let t0 = Instant::now();
             let unwatched = roots.iter().filter(|r| !watching || r.as_path() == Path::new("/") || !is_local_volume(r)).cloned().collect();
-            let mut w = Walker { shared: s.clone(), roots: roots.clone(), ext_group, groups: cfg.groups.len(), gate: cfg.gate, ignore, wake: Box::new(wake), last_wake: Instant::now(), count: 0, counts: HashMap::new(), unwatched, mtime_trusted: roots.iter().filter(|r| dir_mtime_reliable(r)).cloned().collect(), prev, cur: HashMap::new(), cache_file: cfg.cache_file, sig, dirty: false, last_save: Instant::now(), listed: 0 };
+            let mut w = Walker { shared: s.clone(), roots: roots.clone(), ext_group, groups: cfg.groups.len(), gate: cfg.gate, ignore, wake: Box::new(wake), last_wake: Instant::now(), count: 0, counts: HashMap::new(), unwatched, mtime_trusted: roots.iter().filter(|r| dir_mtime_reliable(r)).cloned().collect(), prev, cur: HashMap::new(), cache_file: cfg.cache_file, sig, dirty: false, last_save: Instant::now(), listed: 0, stack: Vec::new(), tried: HashSet::new(), in_priority: false, priority_on: true };
             for r in &roots {
                 if w.stopped() {
                     return;
@@ -317,6 +326,10 @@ impl Scanner {
                 st.relisted = w.listed;
                 st.clone()
             };
+            // 첫 훑기가 끝나면 모든 폴더를 안다 — 우선 큐는 더 쓰지 않는다
+            w.priority_on = false;
+            w.tried = HashSet::new();
+            s.priority.lock().unwrap_or_else(|e| e.into_inner()).clear();
             log::info!("스캔 완료: 폴더 {} (다시 나열 {}) · 파일 {} · {:.1}s · 감시 {}", st.dirs, w.listed, st.photos, t0.elapsed().as_secs_f64(), if watching { "켬" } else { "끔" });
             (w.wake)();
             if watching {
@@ -368,6 +381,14 @@ impl Scanner {
         self.shared.status.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// 먼저 훑을 폴더들 (트리 경로 — 앞쪽이 먼저). 큐를 통째로 바꾼다. 첫 훑기 도중에만 효과가 있다:
+    /// 스캐너는 지금 훑는 폴더의 다음 하위로 넘어가기 전에 큐에서 하나씩 꺼내 그 폴더(하위 전체)를 먼저 훑고 판정을 공개한다.
+    /// 매 프레임 불려도 되게 가볍다 (파일 시스템을 건드리지 않음, 잠금 짧게). 받을지 말지는 스캔 스레드가 정한다.
+    pub fn prioritize(&self, paths: Vec<PathBuf>) {
+        let q: Vec<PathBuf> = paths.iter().rev().map(|p| self.key(p).into_owned()).collect();
+        *self.shared.priority.lock().unwrap_or_else(|e| e.into_inner()) = q;
+    }
+
     /// 마지막으로 가져간 뒤 바뀐 폴더들 (정규 경로)
     pub fn take_changed(&self) -> Vec<PathBuf> {
         std::mem::take(&mut *self.shared.changed.lock().unwrap_or_else(|e| e.into_inner()))
@@ -407,6 +428,14 @@ struct Walker {
     listed: u64,
     /// 폴더 수정 시각을 믿을 수 있는 루트 (APFS·HFS+). FAT/exFAT 카드 등은 늘 다시 나열한다.
     mtime_trusted: Vec<PathBuf>,
+    /// 지금 훑는 중인 폴더들 (나열 성공 ~ 공개 직전) — 우선 스캔이 조상·자신을 다시 훑지 않게
+    stack: Vec<PathBuf>,
+    /// 우선 큐에서 이미 꺼내 본 경로 (받았든 버렸든 다시 보지 않는다)
+    tried: HashSet<PathBuf>,
+    /// 우선 스캔 중 (중첩해서 꺼내지 않는다)
+    in_priority: bool,
+    /// 우선 큐를 볼 것인가 (첫 훑기 동안만)
+    priority_on: bool,
 }
 
 /// 한 폴더 나열 결과
@@ -517,6 +546,8 @@ impl Walker {
         let f = if self.watched(dir) { f } else { Found { unknown: true, ..f } };
         let info = DirInfo { found: f, direct: l.counts.clone(), kids };
         self.shared.verdicts.write().unwrap_or_else(|e| e.into_inner()).insert(dir.to_path_buf(), info);
+        #[cfg(test)]
+        self.shared.order.lock().unwrap().push(dir.to_path_buf());
         f
     }
 
@@ -572,6 +603,7 @@ impl Walker {
             return Found::UNKNOWN;
         };
         self.record_count(dir, &l.counts);
+        self.stack.push(dir.to_path_buf());
         //#region 하위 판정 — 다른 루트·시스템 폴더는 들어가지 않고 이미 아는 결과(없으면 모름)를 쓴다
         // 표식은 매번 새로 합친다 (옛 값에 OR 하지 않음 — 마지막 PNG 를 지우면 PNG 비트가 빠져야 한다)
         let mut f = Found { mask: l.mask(), unknown: l.unknown_child };
@@ -583,9 +615,14 @@ impl Walker {
             }
         }
         for sub in l.subdirs.clone() {
+            self.run_priority();
             let v = if self.is_system(&sub) {
                 continue;
             } else if self.skip(&sub, is_root.then_some(dir)) {
+                self.known(&sub)
+            } else if self.priority_on && self.cur.contains_key(&sub) {
+                // 첫 훑기에서 이미 cur 에 있으면 우선 스캔으로 훑은 것 — 다시 내려가지 않는다 (합계·나열 이중 계산 없음).
+                // 변경 따라가기(follow)에선 예전처럼 다시 내려간다.
                 self.known(&sub)
             } else {
                 self.walk(&sub, false)
@@ -595,6 +632,7 @@ impl Walker {
         }
         //#endregion
         f.unknown |= self.stopped();
+        self.stack.pop();
         let published = self.set_info(dir, f, &l, kids);
         if !self.stopped() {
             self.remember(dir, mtime, &l, published);
@@ -602,6 +640,63 @@ impl Walker {
         self.maybe_wake();
         f
     }
+
+    //#region 우선 스캔 — 앱이 트리에서 보이는(아직 모르는) 폴더를 먼저 훑는다
+    /// 우선 큐에서 받을 만한 경로 하나를 꺼내 그 자리에서 (하위까지) 훑는다. 나중에 본 순회가 거기 오면 `cur` 를 보고 내려가지 않는다.
+    fn run_priority(&mut self) {
+        if !self.priority_on || self.in_priority || self.stopped() {
+            return;
+        }
+        loop {
+            // 잠금은 하나 꺼내는 동안만 — 받을지 판단(파일 시스템 조회)은 잠금 밖에서
+            let Some(p) = self.shared.priority.lock().unwrap_or_else(|e| e.into_inner()).pop() else { return };
+            if self.accept(&p) {
+                log::debug!("스캔: 우선 훑기 {}", p.display());
+                self.in_priority = true;
+                self.walk(&p, false);
+                self.in_priority = false;
+                return;
+            }
+        }
+    }
+
+    /// 우선 훑어도 되는 경로인가 — 본 순회가 언젠가 그대로 들를 곳만 받는다 (그래야 합계·저장이 어긋나지 않는다)
+    fn accept(&mut self, p: &Path) -> bool {
+        if !self.tried.insert(p.to_path_buf()) || self.cur.contains_key(p) {
+            return false;
+        }
+        // 지금 훑는 중인 조상·자신이면 버린다 (그 순회가 곧 공개한다)
+        if self.stack.iter().any(|s| s.starts_with(p)) || self.roots.iter().any(|r| r == p) {
+            return false;
+        }
+        let Some(root) = self.root_of(p) else { return false };
+        // 조상을 이미 다 훑었는데 자신이 없으면 본 순회가 들르지 않은 곳(나열 뒤 생긴 폴더 등) — 감시가 맡는다
+        if p.ancestors().skip(1).take_while(|a| a.starts_with(&root)).any(|a| self.cur.contains_key(a)) {
+            return false;
+        }
+        is_local_volume(&root) && p.canonicalize().is_ok_and(|c| c == p) && p.is_dir() && self.in_scope(&root, p)
+    }
+
+    /// `p` 를 품은 가장 가까운 루트
+    fn root_of(&self, p: &Path) -> Option<PathBuf> {
+        self.roots.iter().filter(|r| p.starts_with(r)).max_by_key(|r| r.components().count()).cloned()
+    }
+
+    /// 루트부터 내려가며 본 순회가 건너뛰는 폴더(숨김·번들·Finder 숨김·시스템·~/Library·다른 루트) 아래가 아닌가
+    fn in_scope(&self, root: &Path, p: &Path) -> bool {
+        let Ok(rel) = p.strip_prefix(root) else { return false };
+        let mut cur = root.to_path_buf();
+        for c in rel.components() {
+            let next = cur.join(c);
+            let hidden = c.as_os_str().to_string_lossy().starts_with('.');
+            if hidden || is_bundle(&next) || finder_hidden(&next) || self.skip(&next, (cur == root).then_some(cur.as_path())) {
+                return false;
+            }
+            cur = next;
+        }
+        true
+    }
+    //#endregion
 
     /// 한 폴더만 다시 판정 (하위 판정은 아는 것을 쓴다). `walk_new` 면 모르는 하위(새 폴더)는 훑고, 사라진 하위는 잊는다.
     fn shallow(&mut self, dir: &Path, walk_new: bool) -> Found {
@@ -705,19 +800,9 @@ impl Walker {
         if self.ignore.iter().any(|ig| e.dir.starts_with(ig)) {
             return None;
         }
-        let root = self.roots.iter().filter(|r| e.dir.starts_with(r)).max_by_key(|r| r.components().count())?.clone();
+        let root = self.root_of(&e.dir)?;
         // 루트부터 내려가며 건너뛰는 폴더(시스템·~/Library·번들·점 폴더) 아래면 버린다
-        let rel = e.dir.strip_prefix(&root).ok()?.to_path_buf();
-        let mut cur = root.clone();
-        for c in rel.components() {
-            let next = cur.join(c);
-            let hidden = c.as_os_str().to_string_lossy().starts_with('.');
-            if hidden || is_bundle(&next) || finder_hidden(&next) || self.skip(&next, (cur == root).then_some(cur.as_path())) {
-                return None;
-            }
-            cur = next;
-        }
-        Some(e)
+        self.in_scope(&root, &e.dir).then_some(e)
     }
 
     fn rescan(&mut self, dir: &Path, deep: bool) {
@@ -1042,6 +1127,132 @@ mod tests {
         assert_eq!(second.verdict_for(&c.join("deep"), 2), Verdict::HasPhotos);
         assert_eq!(st.photos, 3);
         let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 큰 시험 트리: 맨 위 폴더 t0..t9 마다 사진 없는 하위 60개 + 끝쪽 폴더 z(사진 없는 s1/t·s2·s3, 숨김 .hid),
+    /// t3/k 에 jpg 1장, t7 에 png 1장. 돌려주는 값 = (루트, 본 순회가 **마지막에** 들를 맨 위 폴더 이름).
+    /// 나열 순서는 파일 시스템이 정하므로, 실제 read_dir 순서의 마지막 폴더 아래에 z 를 둔다.
+    fn big_tree(tag: &str) -> (PathBuf, String) {
+        let d = std::env::temp_dir().join(format!("iv-scan-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for i in 0..10 {
+            for j in 0..60 {
+                std::fs::create_dir_all(d.join(format!("t{i}/e{j:02}"))).unwrap();
+            }
+        }
+        let last = std::fs::read_dir(&d).unwrap().flatten().last().unwrap().file_name().to_string_lossy().into_owned();
+        for s in ["s1/t", "s2", "s3", ".hid"] {
+            std::fs::create_dir_all(d.join(&last).join("z").join(s)).unwrap();
+        }
+        std::fs::create_dir_all(d.join("t3/k")).unwrap();
+        std::fs::write(d.join("t3/k/p.jpg"), b"x").unwrap();
+        std::fs::write(d.join("t7/q.png"), b"x").unwrap();
+        std::fs::write(d.join(&last).join("z/s2/notes.txt"), b"x").unwrap();
+        (d, last)
+    }
+
+    /// 트리 전체의 (경로 → 판정·직접 수·하위) — 두 실행 비교용
+    fn snapshot(s: &Scanner, c: &Path) -> Vec<(PathBuf, Found, Vec<u32>, usize)> {
+        let mut out = Vec::new();
+        let mut todo = vec![c.to_path_buf()];
+        while let Some(p) = todo.pop() {
+            let Some(i) = s.info(&p) else {
+                out.push((p, Found::UNKNOWN, Vec::new(), usize::MAX));
+                continue;
+            };
+            todo.extend(i.kids.iter().cloned());
+            out.push((p, i.found, i.direct.clone(), i.kids.len()));
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    /// 게이트로 스캐너를 첫 폴더 앞에 세워 두고 큐를 채운 뒤 풀어 준다 (첫 하위 전에 큐를 확실히 보게)
+    fn start_prioritized(d: &Path, paths: Vec<PathBuf>, cache_file: Option<PathBuf>) -> Scanner {
+        let gate = Arc::new(Gate::new());
+        gate.set_busy(true);
+        let s = Scanner::start(ScanConfig { roots: vec![d.to_path_buf()], groups: vec![vec!["jpg"], vec!["png"]], gate: Some(gate.clone()), ignore: Vec::new(), cache_file }, || {});
+        s.prioritize(paths);
+        gate.set_busy(false);
+        let until = Instant::now() + Duration::from_secs(10);
+        while !s.status().done && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(s.status().done);
+        s
+    }
+
+    /// 우선 스캔: 결과(판정·직접 수·하위·합계·나열 수)가 우선 스캔이 없을 때와 똑같다
+    #[test]
+    fn priority_scan_identical() {
+        let (d, last) = big_tree("p");
+        let c = d.canonicalize().unwrap();
+        let (z, zc) = (d.join(&last).join("z"), c.join(&last).join("z"));
+        let base = run(&d);
+        let want = snapshot(&base, &c);
+        let bst = base.status();
+        drop(base);
+        // 받으면 안 되는 것도 섞는다: 루트 자신, 숨김 폴더, 범위 밖, 없는 경로
+        let s = start_prioritized(&d, vec![z.join("s1"), z.join("s2"), d.clone(), z.join(".hid"), std::env::temp_dir(), d.join("nope"), z.clone()], None);
+        let st = s.status();
+        assert_eq!(s.verdict(&zc.join("s1")), Verdict::Empty);
+        assert_eq!(s.verdict(&zc), Verdict::Empty);
+        assert_eq!(s.verdict(&zc.join(".hid")), Verdict::Unknown, "숨김 폴더는 받지 않는다");
+        assert_eq!(snapshot(&s, &c), want);
+        assert_eq!((st.dirs, st.photos, st.photo_dirs, st.totals.clone(), st.dir_masks.clone()), (bst.dirs, bst.photos, bst.photo_dirs, bst.totals.clone(), bst.dir_masks.clone()));
+        assert_eq!(st.relisted, st.dirs, "폴더마다 한 번만 나열");
+        assert_eq!(bst.relisted, bst.dirs);
+        // 공개는 폴더마다 한 번 (우선 훑은 곳을 본 순회가 다시 공개하지 않음)
+        let order = s.shared.order.lock().unwrap().clone();
+        assert_eq!(order.len() as u64, st.dirs);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 우선 스캔: 큐에 넣은 폴더(본 순회가 마지막에 들를 곳)가 다른 맨 위 폴더들보다 먼저 공개된다
+    #[test]
+    fn priority_scan_publishes_first() {
+        let (d, last) = big_tree("po");
+        let c = d.canonicalize().unwrap();
+        let s = start_prioritized(&d, vec![d.join(&last).join("z/s1"), d.join(&last).join("z")], None);
+        let order = s.shared.order.lock().unwrap().clone();
+        let pos = |p: &Path| order.iter().position(|o| o == p).unwrap_or_else(|| panic!("공개 안 됨: {}", p.display()));
+        let z = pos(&c.join(&last).join("z"));
+        assert!(pos(&c.join(&last).join("z/s1")) < z);
+        // z 밑 폴더 5개(z·s1·s1/t·s2·s3) 공개가 맨 처음
+        assert!(z < 5, "z 공개 순서 {z}");
+        for i in 0..10 {
+            let t = format!("t{i}");
+            if t != last {
+                assert!(z < pos(&c.join(&t)), "{t} 보다 먼저");
+            }
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// 저장 결과 + 우선 스캔: 저장 파일 내용이 우선 스캔 없을 때와 같다
+    #[test]
+    fn priority_scan_saves_same_cache() {
+        let (d, last) = big_tree("ps");
+        let f1 = std::env::temp_dir().join(format!("iv-scan-pcache1-{}.tsv", std::process::id()));
+        let f2 = std::env::temp_dir().join(format!("iv-scan-pcache2-{}.tsv", std::process::id()));
+        let _ = (std::fs::remove_file(&f1), std::fs::remove_file(&f2));
+        drop(run_cached(&d, Some(f1.clone())));
+        let s = start_prioritized(&d, vec![d.join(&last).join("z/s1/t"), d.join("t5"), d.join(&last).join("z")], Some(f2.clone()));
+        drop(s);
+        let sig = "jpg;png";
+        let (a, b) = (persist::load(&f1, sig), persist::load(&f2, sig));
+        assert!(!a.is_empty());
+        let mut ka: Vec<_> = a.keys().collect();
+        let mut kb: Vec<_> = b.keys().collect();
+        ka.sort();
+        kb.sort();
+        assert_eq!(ka, kb);
+        for (k, v) in &a {
+            let w = &b[k];
+            assert_eq!((v.found, &v.counts, &v.subdirs, &v.links, v.unknown_child), (w.found, &w.counts, &w.subdirs, &w.links, w.unknown_child), "{}", k.display());
+        }
+        let _ = (std::fs::remove_file(&f1), std::fs::remove_file(&f2));
         let _ = std::fs::remove_dir_all(&d);
     }
 
