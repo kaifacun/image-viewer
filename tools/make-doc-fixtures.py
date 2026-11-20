@@ -5,7 +5,40 @@ OUT = os.path.join(os.path.dirname(__file__), "..", "scratch", "docs")
 os.makedirs(OUT, exist_ok=True)
 w = lambda n, s: open(os.path.join(OUT, n), "w").write(s)
 w("notes.txt", "KaiIV 문서 모드 시험\n\n" + "\n".join(f"{i:03d} 줄 — 한글과 English 가 섞인 본문입니다." for i in range(1, 200)))
-w("readme.md", "# KaiIV\n\n빠른 이미지 뷰어.\n\n## 기능\n- 사진\n- 비디오\n- 문서\n\n```rust\nfn main() { println!(\"hi\"); }\n```\n")
+w("readme.md", """# KaiIV
+
+**빠른** 이미지 뷰어 — *사진*, 비디오, 문서를 한 곳에서. ~~느린 뷰어~~ 는 이제 그만. 링크: [KaiIV](https://example.com), 인라인 `cargo build`.
+
+## 기능
+- 사진
+  - HEIC · RAW
+  - 회전 저장
+- 비디오
+- 문서
+
+1. 첫째
+2. 둘째
+
+- [x] PDF 쪽 넘기기
+- [ ] 오피스 여러 쪽
+
+> 인용문: 모르면 숨기지 않는다.
+
+| 모드 | 단축키 | 비고 |
+|---|---|---|
+| 사진 | ⌘1 | 기본 |
+| 비디오 | ⌘2 | AVFoundation |
+| 문서 | ⌘3 | PDF·훑어보기 |
+
+```rust
+fn main() {
+    println!("안녕, KaiIV");
+}
+```
+
+---
+끝.
+""")
 w("main.rs", "//! 예시 코드\nfn main() {\n    let v: Vec<u32> = (0..10).collect();\n    println!(\"{:?}\", v);\n}\n" * 10)
 w("letter.html", "<h1>안내문</h1><p>KaiIV 문서 모드 <b>시험</b> 문서입니다.</p>" + "<p>본문 단락입니다.</p>" * 30)
 for fmt in ("rtf", "docx"):

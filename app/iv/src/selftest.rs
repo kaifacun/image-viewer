@@ -127,6 +127,7 @@ fn parse(t: &str) -> Option<Step> {
             "cut" => Action::Cut,
             "paste" => Action::Paste(None),
             "copypath" => Action::CopyPath,
+            "markdown" => Action::ToggleMarkdown,
             "kind=image" => Action::SetKind(iv_core::formats::MediaKind::Image),
             "kind=video" => Action::SetKind(iv_core::formats::MediaKind::Video),
             "kind=document" => Action::SetKind(iv_core::formats::MediaKind::Document),

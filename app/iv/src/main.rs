@@ -9,6 +9,7 @@ mod headless;
 mod input;
 mod renderer;
 mod selftest;
+mod textdoc;
 mod window_app;
 
 fn main() {

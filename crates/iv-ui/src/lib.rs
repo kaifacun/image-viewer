@@ -4,6 +4,7 @@
 pub mod browser;
 pub mod dialog;
 pub mod icons;
+pub mod markdown;
 pub mod theme;
 
 use egui::{Align2, Color32, CornerRadius, Frame, Margin, RichText, Vec2};
@@ -26,6 +27,22 @@ pub struct UiModel<'a> {
     pub video: Option<VideoUi>,
     /// PDF 를 보는 중이면 (지금 쪽 0부터, 쪽 수)
     pub pages: Option<(usize, usize)>,
+    /// 글 문서를 보는 중이면 (이미지 대신 글)
+    pub text: Option<TextView<'a>>,
+}
+
+/// 전체 보기의 글 문서
+pub struct TextView<'a> {
+    pub name: &'a str,
+    pub text: &'a str,
+    /// 줄 번호·고정폭
+    pub code: bool,
+    /// 마크다운 파일인가 (보기/원문 전환 버튼)
+    pub markdown: bool,
+    /// 마크다운을 꾸며 보이는 중
+    pub rendered: bool,
+    /// 인코딩·잘림 안내
+    pub note: &'a str,
 }
 
 /// 비디오 조작 막대에 보일 상태
@@ -93,6 +110,9 @@ pub fn install_fonts(ctx: &egui::Context) {
 /// 오버레이를 그리고, 사용자가 누른 버튼의 Action 을 돌려준다.
 pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
     let mut actions = Vec::new();
+    if let Some(t) = &m.text {
+        text_view(ctx, t, &mut actions);
+    }
 
     //#region 아래쪽 떠 있는 막대 — 목록 · 이전/다음 · 맞춤/1:1 · 정보 · 회전/저장 | 상태
     egui::Area::new(egui::Id::unique("iv-view-bar")).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -14.0)).show(ctx, |ui| {
@@ -177,10 +197,11 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
                         }
                         sep(ui);
                     }
-                    if icon_button(ui, Icon::Expand, "화면에 맞춤 (0)", m.has_image, false).clicked() {
+                    // 글 문서엔 맞춤·1:1 이 없다
+                    if m.text.is_none() && icon_button(ui, Icon::Expand, "화면에 맞춤 (0)", m.has_image, false).clicked() {
                         actions.push(Action::Fit);
                     }
-                    if ui.add_enabled(m.has_image, egui::Button::new(RichText::new("1:1").size(theme::FONT_SMALL).strong()).frame(false).min_size(Vec2::new(28.0, 26.0))).on_hover_text("원본 크기 (1)").clicked() {
+                    if m.text.is_none() && ui.add_enabled(m.has_image, egui::Button::new(RichText::new("1:1").size(theme::FONT_SMALL).strong()).frame(false).min_size(Vec2::new(28.0, 26.0))).on_hover_text("원본 크기 (1)").clicked() {
                         actions.push(Action::ActualSize);
                     }
                     if icon_toggle(ui, Icon::Info, "정보 (I)", m.has_image, false, m.show_info).clicked() {
@@ -260,3 +281,76 @@ pub fn codec_prompt(ctx: &egui::Context) -> Option<Action> {
     });
     out
 }
+
+//#region 글 문서 보기 — 마크다운(꾸민 보기/원문)·글·코드(줄 번호)
+fn text_view(ctx: &egui::Context, t: &TextView<'_>, actions: &mut Vec<Action>) {
+    ctx.root_ui(|ui| {
+        egui::CentralPanel::default().frame(Frame::new().fill(theme::BG_CANVAS)).show(ui, |ui| {
+            //#region 머리 — 파일 이름 · 안내 · 보기/원문
+            egui::Frame::new().fill(theme::BG_PANEL).inner_margin(Margin::symmetric(16, 8)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), egui::Sense::hover());
+                    icons::paint(ui.painter(), icons::Icon::Document, r, theme::ACCENT);
+                    ui.label(RichText::new(t.name).strong().color(theme::TEXT));
+                    ui.label(RichText::new(t.note).size(theme::FONT_SMALL).color(theme::TEXT_FAINT));
+                    if t.markdown {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            for (label, on) in [("원문", !t.rendered), ("보기", t.rendered)] {
+                                let b = egui::Button::new(RichText::new(label).color(if on { Color32::WHITE } else { theme::TEXT_DIM })).selected(on);
+                                if ui.add(b).on_hover_text("마크다운 보기 ↔ 원문 (⌘/)").clicked() && !on {
+                                    actions.push(Action::ToggleMarkdown);
+                                }
+                            }
+                        });
+                    }
+                });
+            });
+            //#endregion
+            let bottom_pad = 80.0; // 아래 떠 있는 막대에 가리지 않게
+            if t.code {
+                code_lines(ui, t.text, bottom_pad);
+                return;
+            }
+            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                // 읽기 좋은 폭 (가운데)
+                let w = ui.available_width().min(860.0);
+                let pad = ((ui.available_width() - w) / 2.0).max(16.0);
+                ui.horizontal_top(|ui| {
+                    ui.add_space(pad);
+                    ui.vertical(|ui| {
+                        ui.set_max_width(w);
+                        ui.add_space(18.0);
+                        if t.markdown && t.rendered {
+                            markdown::show(ui, t.text);
+                        } else {
+                            ui.add(egui::Label::new(RichText::new(t.text).size(14.0).color(theme::TEXT).line_height(Some(22.0))).selectable(true).wrap());
+                        }
+                        ui.add_space(bottom_pad);
+                    });
+                });
+            });
+        });
+    });
+}
+
+/// 코드: 줄 번호 + 고정폭, 보이는 줄만 그린다 (큰 파일도 가볍게)
+fn code_lines(ui: &mut egui::Ui, text: &str, bottom_pad: f32) {
+    let lines: Vec<&str> = text.lines().collect();
+    let font = egui::FontId::monospace(13.0);
+    let row_h = 19.0;
+    let num_w = format!("{}", lines.len()).len() as f32 * 8.0 + 20.0;
+    egui::ScrollArea::both().auto_shrink(false).show_rows(ui, row_h, lines.len() + (bottom_pad / row_h) as usize, |ui, range| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for i in range {
+            ui.horizontal(|ui| {
+                ui.set_height(row_h);
+                let Some(l) = lines.get(i) else { return };
+                let (r, _) = ui.allocate_exact_size(Vec2::new(num_w, row_h), egui::Sense::hover());
+                ui.painter().text(r.right_center() - Vec2::new(10.0, 0.0), Align2::RIGHT_CENTER, format!("{}", i + 1), font.clone(), theme::TEXT_FAINT);
+                ui.add(egui::Label::new(RichText::new(*l).font(font.clone()).color(theme::TEXT)).selectable(true).extend());
+            });
+        }
+    });
+}
+//#endregion

@@ -106,6 +106,8 @@ pub enum Action {
     Video(VideoCmd),
     /// 문서 쪽 넘기기 (전체 보기) — 쪽 상태는 앱이 가진다
     Page(PageCmd),
+    /// 마크다운 문서: 꾸민 보기 ↔ 원문 (앱이 처리)
+    ToggleMarkdown,
     /// 추가 코덱 엔진 받기에 동의 / 나중에 (앱이 처리 — 뷰어 상태와 무관)
     InstallCodecs,
     DismissCodecPrompt,
@@ -739,7 +741,7 @@ impl ViewerState {
                     None => Effects::redraw(),
                 }
             }
-            Action::InstallCodecs | Action::DismissCodecPrompt => Effects::default(),
+            Action::InstallCodecs | Action::DismissCodecPrompt | Action::ToggleMarkdown => Effects::default(),
             Action::Page(cmd) => {
                 if self.mode != Mode::View || self.kind != MediaKind::Document {
                     return Effects::default();

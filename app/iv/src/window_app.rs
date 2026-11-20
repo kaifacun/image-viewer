@@ -140,6 +140,10 @@ struct App {
     needs_convert: HashSet<u64>,
     /// 전체 보기 중인 PDF
     pdf: Option<PdfView>,
+    /// 전체 보기 중인 글 문서 (항목 키, 내용)
+    text_doc: Option<(u64, crate::textdoc::TextDoc)>,
+    /// 마크다운을 꾸며 보이기 (끄면 원문) — 파일을 넘겨도 유지
+    md_rendered: bool,
     //#endregion
     /// 자가 시험이 주입할 egui 입력 (프레임마다 한 묶음)
     injected: VecDeque<Vec<egui::Event>>,
@@ -221,6 +225,8 @@ impl App {
             convert: None,
             needs_convert: HashSet::new(),
             pdf: None,
+            text_doc: None,
+            md_rendered: true,
             injected: VecDeque::new(),
             wait_thumbs_until: None,
             reconfigures: 0,
@@ -275,6 +281,7 @@ impl App {
         }
         self.sync_video();
         self.sync_pdf();
+        self.sync_text();
         if fx.redraw || fx.window_changed || fx.library_changed || fx.reveal {
             self.update_title();
             if let Some(g) = &self.gfx {
@@ -491,6 +498,24 @@ impl App {
         if self.pdf.is_some() {
             self.render_pdf_page(self.pdf_side(None));
         }
+    }
+
+    /// 화면 상태에 글 문서 보기를 맞춘다 (멱등 — 2MB 까지 바로 읽는다)
+    fn sync_text(&mut self) {
+        let want = (self.viewer.mode == Mode::View && self.viewer.kind() == MediaKind::Document)
+            .then(|| self.viewer.current().and_then(|e| e.path().filter(|p| crate::textdoc::text_kind(p).is_some()).map(|p| (e.id.0, p.to_path_buf()))))
+            .flatten();
+        if self.text_doc.as_ref().map(|(k, _)| *k) == want.as_ref().map(|(k, _)| *k) {
+            return;
+        }
+        self.text_doc = None;
+        if let Some((key, path)) = want {
+            match crate::textdoc::load(&path) {
+                Ok(t) => self.text_doc = Some((key, t)),
+                Err(e) => self.viewer.error = Some(e),
+            }
+        }
+        self.request_redraw();
     }
 
     /// 그릴 긴 변: 화면이 필요로 하는 만큼 (창 긴 변 이상, 8192 이하)
@@ -844,6 +869,11 @@ impl App {
                 self.request_redraw();
                 return;
             }
+            Action::ToggleMarkdown => {
+                self.md_rendered = !self.md_rendered;
+                self.request_redraw();
+                return;
+            }
             Action::DismissCodecPrompt => {
                 self.codec_prompt = false;
                 self.codec_declined = true;
@@ -888,6 +918,12 @@ impl App {
     fn status(&self) -> String {
         let r = self.renderer_name();
         match self.viewer.mode {
+            // 글 문서는 이미지 정보(크기·배율·디코드 시간)가 의미 없다 — 이름과 위치만
+            Mode::View if self.text_doc.is_some() => {
+                let lib = &self.viewer.library;
+                let name = lib.current().map(|e| e.name.as_str()).unwrap_or("");
+                format!("{name}  ·  {}/{}", lib.index() + 1, lib.len())
+            }
             Mode::View => self.viewer.status_line(&r),
             Mode::Browse => {
                 let size = self.viewer.current().and_then(|e| self.browser.textures.full_size(e.id.0));
@@ -1060,6 +1096,14 @@ impl App {
                 }
             })
         } else {
+            //#region 글 문서 머리 글 — 이름, 인코딩·잘림 안내, 마크다운인가
+            let text_name = self.viewer.current().map(|e| e.name.clone()).unwrap_or_default();
+            let text_is_md = text_name.to_ascii_lowercase().ends_with(".md") || text_name.to_ascii_lowercase().ends_with(".markdown");
+            let text_note = self.text_doc.as_ref().map_or(String::new(), |(_, t)| {
+                let lines = t.text.lines().count();
+                format!("{} · {}줄{}", t.encoding, lines, if t.truncated { " · 앞 2MB 만" } else { "" })
+            });
+            //#endregion
             let model = iv_ui::UiModel {
                 status,
                 show_info: self.viewer.show_info,
@@ -1069,6 +1113,14 @@ impl App {
                 rotated: self.viewer.turns() != 0,
                 can_rotate: self.viewer.kind() == MediaKind::Image,
                 pages: self.pdf.as_ref().map(|p| (p.page, p.pages)),
+                text: self.text_doc.as_ref().map(|(_, t)| iv_ui::TextView {
+                    name: text_name.as_str(),
+                    text: &t.text,
+                    code: t.code && !text_is_md,
+                    markdown: text_is_md,
+                    rendered: self.md_rendered,
+                    note: text_note.as_str(),
+                }),
                 video: self.video.as_ref().map(|(_, p)| iv_ui::VideoUi { playing: p.is_playing(), position: p.position(), duration: p.duration(), volume: p.volume(), muted: p.muted() }),
             };
             let prompt = self.codec_prompt;
@@ -1482,7 +1534,8 @@ impl ApplicationHandler<UserEvent> for App {
         if matches!(event, WindowEvent::MouseInput { state: ElementState::Released, .. } | WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false)) {
             self.dragging = None;
         }
-        let browse = self.viewer.mode == Mode::Browse;
+        // 글 문서를 보는 중이면 마우스(휠 스크롤·끌어 선택)는 egui 몫 — 앱의 확대·이동 매핑을 쓰지 않는다
+        let browse = self.viewer.mode == Mode::Browse || self.text_doc.is_some();
         // egui 가 먼저 본다 (버튼 위 클릭 등은 egui 몫)
         if let Some(g) = &mut self.gfx {
             // RedrawRequested 를 egui 에 넘기면 repaint=true 를 돌려줘 무한 다시 그리기가 된다 (대기 중 CPU 12%)

@@ -12,6 +12,7 @@ iv-core.workspace = true
 iv-library.workspace = true
 iv-fstree.workspace = true
 iv-fsops.workspace = true
+pulldown-cmark = { version = "0.13", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

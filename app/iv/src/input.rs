@@ -11,10 +11,11 @@ pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode,
     //#region 문서 전체 보기: ←/→·Space 쪽 넘기기, Home/End 처음·끝 쪽 (PageUp/PageDown 은 다른 파일)
     if kind == MediaKind::Document && mode == Mode::View && !cmd {
         let a = match key {
-            Key::Named(NamedKey::ArrowRight | NamedKey::ArrowDown) => Some(PageCmd::Next),
+            // ↑/↓ 는 글 문서 스크롤에 양보 (egui 스크롤 영역)
+            Key::Named(NamedKey::ArrowRight) => Some(PageCmd::Next),
             Key::Named(NamedKey::Space) if !shift => Some(PageCmd::Next),
             Key::Named(NamedKey::Space) => Some(PageCmd::Prev),
-            Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => Some(PageCmd::Prev),
+            Key::Named(NamedKey::ArrowLeft) => Some(PageCmd::Prev),
             Key::Named(NamedKey::Home) => Some(PageCmd::First),
             Key::Named(NamedKey::End) => Some(PageCmd::Last),
             _ => None,
@@ -76,6 +77,8 @@ pub fn key_action(key: &Key, mods: ModifiersState, fullscreen: bool, mode: Mode,
             ("q" | "w", true, _) => Some(Action::Quit),
             ("r", true, _) => Some(Action::Refresh),
             ("a", true, Mode::Browse) => Some(Action::SelectAll),
+            // 마크다운 보기 ↔ 원문
+            ("/", true, Mode::View) => Some(Action::ToggleMarkdown),
             // 종류: ⌘1 사진 · ⌘2 비디오 · ⌘3 문서
             ("1", true, _) => Some(Action::SetKind(iv_core::formats::MediaKind::Image)),
             ("2", true, _) => Some(Action::SetKind(iv_core::formats::MediaKind::Video)),
