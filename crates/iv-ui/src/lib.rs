@@ -3,6 +3,7 @@
 
 pub mod browser;
 pub mod dialog;
+pub mod modal;
 pub mod icons;
 pub mod markdown;
 pub mod theme;
@@ -256,27 +257,19 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
 /// 추가 코덱 엔진 받기 동의 창 — 답이 있으면 그 Action
 pub fn codec_prompt(ctx: &egui::Context) -> Option<Action> {
     let mut out = None;
-    egui::Modal::new(egui::Id::unique("iv-codec-prompt")).show(ctx, |ui| {
-        ui.set_width(420.0);
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
-            icons::paint(ui.painter(), icons::Icon::Video, r, theme::ACCENT);
-            ui.label(RichText::new("추가 코덱 엔진이 필요합니다").size(15.0).strong().color(theme::TEXT));
-        });
-        ui.add_space(8.0);
-        ui.label(RichText::new("이 영상은 macOS 기본 엔진으로 열 수 없는 형식입니다 (MKV·WebM·AVI·WMV·FLV·VP9·MPEG-2 등). 무료 코덱 엔진 FFmpeg 를 받아 별도 프로그램으로 사용합니다.").color(theme::TEXT_DIM));
-        ui.add_space(6.0);
-        ui.label(RichText::new("• Homebrew 가 있으면 brew 로 설치, 없으면 검증된 빌드(약 57MB)를 받아 SHA-256 이 맞을 때만 씁니다.\n• 한 번 받으면 이후 필요한 영상은 자동으로 처리합니다.").size(theme::FONT_SMALL).color(theme::TEXT_FAINT));
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("받기").strong().color(Color32::WHITE)).fill(theme::ACCENT_BG)).clicked() {
-                    out = Some(Action::InstallCodecs);
-                }
-                if ui.button("나중에").clicked() {
-                    out = Some(Action::DismissCodecPrompt);
-                }
-            });
+    modal::modal("iv-codec-prompt").show(ctx, |ui| {
+        modal::begin(ui, 440.0);
+        modal::title(ui, Some(icons::Icon::Video), "추가 코덱 엔진이 필요합니다");
+        modal::body(ui, "이 영상은 macOS 기본 엔진으로 열 수 없는 형식입니다 (MKV·WebM·AVI·WMV·FLV·VP9·MPEG-2 등). 무료 코덱 엔진 FFmpeg 를 받아 별도 프로그램으로 사용합니다.");
+        ui.add_space(4.0);
+        modal::note(ui, "• Homebrew 가 있으면 brew 로 설치, 없으면 검증된 빌드(약 57MB)를 받아 SHA-256 이 맞을 때만 씁니다.\n• 한 번 받으면 이후 필요한 영상은 자동으로 처리합니다.");
+        modal::buttons(ui, |ui| {
+            if modal::primary(ui, "받기").clicked() {
+                out = Some(Action::InstallCodecs);
+            }
+            if modal::secondary(ui, "나중에").clicked() {
+                out = Some(Action::DismissCodecPrompt);
+            }
         });
     });
     out
@@ -300,15 +293,11 @@ pub struct UpdateUi<'a> {
     pub auto: bool,
 }
 
-fn primary(ui: &mut egui::Ui, label: &str) -> bool {
-    ui.add(egui::Button::new(RichText::new(label).strong().color(Color32::WHITE)).fill(theme::ACCENT_BG)).clicked()
-}
-
 /// 인앱 업데이트 창 — 답이 있으면 그 Action
 pub fn update_prompt(ctx: &egui::Context, u: &UpdateUi<'_>) -> Option<Action> {
     let mut out = None;
-    let modal = egui::Modal::new(egui::Id::unique("iv-update-prompt")).show(ctx, |ui| {
-        ui.set_width(460.0);
+    let shown = modal::modal("iv-update-prompt").show(ctx, |ui| {
+        modal::begin(ui, 480.0);
         let title = match &u.view {
             UpdateView::Checking => "업데이트 확인 중…".to_string(),
             UpdateView::UpToDate => "최신 판입니다".to_string(),
@@ -317,28 +306,20 @@ pub fn update_prompt(ctx: &egui::Context, u: &UpdateUi<'_>) -> Option<Action> {
             UpdateView::Ready { version } => format!("KaiIV {version} 설치 준비가 끝났습니다"),
             UpdateView::Failed { .. } => "업데이트하지 못했습니다".to_string(),
         };
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
-            icons::paint(ui.painter(), icons::Icon::Refresh, r, theme::ACCENT);
-            ui.label(RichText::new(title).size(15.0).strong().color(theme::TEXT));
-        });
-        ui.add_space(8.0);
-        let dim = |ui: &mut egui::Ui, t: &str| {
-            ui.label(RichText::new(t).color(theme::TEXT_DIM));
-        };
+        modal::title(ui, Some(icons::Icon::Refresh), title);
         match &u.view {
             UpdateView::Checking => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    dim(ui, "배포처에서 새 판을 찾고 있습니다.");
+                    modal::body(ui, "배포처에서 새 판을 찾고 있습니다.");
                 });
             }
-            UpdateView::UpToDate => dim(ui, &format!("지금 쓰시는 KaiIV {} 이 최신 판입니다.", u.current)),
+            UpdateView::UpToDate => modal::body(ui, format!("지금 쓰시는 KaiIV {} 이 최신 판입니다.", u.current)),
             UpdateView::Available { notes, blocked, .. } => {
-                dim(ui, &format!("지금 판: {}", u.current));
+                modal::body(ui, format!("지금 판은 {} 입니다.", u.current));
                 if !notes.is_empty() {
-                    ui.add_space(6.0);
-                    egui::Frame::new().fill(theme::BG_CANVAS).corner_radius(6).inner_margin(Margin::same(10)).show(ui, |ui| {
+                    ui.add_space(4.0);
+                    Frame::new().fill(theme::BG_CANVAS).corner_radius(8).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
                         egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             // 알림 글은 평문 그대로 (링크·마크다운 해석 안 함)
@@ -347,76 +328,69 @@ pub fn update_prompt(ctx: &egui::Context, u: &UpdateUi<'_>) -> Option<Action> {
                     });
                 }
                 if let Some(b) = blocked {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(format!("자동 설치 불가: {b}")).size(theme::FONT_SMALL).color(theme::WARN));
+                    ui.add_space(4.0);
+                    ui.add(egui::Label::new(RichText::new(format!("자동 설치 불가: {b}")).size(theme::FONT_SMALL).color(theme::WARN)).wrap());
                 }
             }
             UpdateView::Downloading { got, total, .. } => {
                 let f = if *total > 0 { (*got as f32 / *total as f32).clamp(0.0, 1.0) } else { 0.0 };
                 ui.add(egui::ProgressBar::new(f).show_percentage());
-                ui.label(RichText::new(format!("{} / {} · 받은 뒤 서명과 해시를 확인합니다", iv_viewer::human_bytes(*got), iv_viewer::human_bytes(*total))).size(theme::FONT_SMALL).color(theme::TEXT_FAINT));
+                modal::note(ui, format!("{} / {} · 받은 뒤 서명과 해시를 확인합니다", iv_viewer::human_bytes(*got), iv_viewer::human_bytes(*total)));
             }
-            UpdateView::Ready { .. } => dim(ui, "서명과 해시를 확인했습니다. KaiIV 를 다시 시작하면 새 판으로 바뀝니다."),
+            UpdateView::Ready { .. } => modal::body(ui, "서명과 해시를 확인했습니다. KaiIV 를 다시 시작하면 새 판으로 바뀝니다."),
             UpdateView::Failed { message } => {
-                ui.label(RichText::new(*message).color(theme::ERROR));
-                ui.add_space(4.0);
-                dim(ui, "배포 쪽에서 직접 받으실 수도 있습니다.");
+                ui.add(egui::Label::new(RichText::new(*message).color(theme::ERROR)).wrap());
+                modal::note(ui, "배포 쪽에서 직접 받으실 수도 있습니다.");
             }
         }
-        ui.add_space(10.0);
+        ui.add_space(8.0);
         let mut auto = u.auto;
         if ui.checkbox(&mut auto, RichText::new("하루 한 번 자동으로 확인").size(theme::FONT_SMALL).color(theme::TEXT_DIM)).changed() {
             out = Some(Action::SetUpdateAuto(auto));
         }
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match &u.view {
-                UpdateView::Checking | UpdateView::Downloading { .. } => {
-                    if ui.button("닫기").clicked() {
-                        out = Some(Action::UpdateLater);
-                    }
+        modal::buttons(ui, |ui| match &u.view {
+            UpdateView::Checking | UpdateView::Downloading { .. } => {
+                if modal::secondary(ui, "닫기").clicked() {
+                    out = Some(Action::UpdateLater);
                 }
-                UpdateView::UpToDate => {
-                    if primary(ui, "확인") {
-                        out = Some(Action::UpdateLater);
-                    }
+            }
+            UpdateView::UpToDate => {
+                if modal::primary(ui, "확인").clicked() {
+                    out = Some(Action::UpdateLater);
                 }
-                UpdateView::Available { blocked, .. } => {
-                    if blocked.is_some() {
-                        if primary(ui, "배포 쪽 열기") {
-                            out = Some(Action::UpdateOpenPage);
-                        }
-                    } else if primary(ui, "지금 업데이트") {
-                        out = Some(Action::UpdateNow);
-                    }
-                    if ui.button("나중에").clicked() {
-                        out = Some(Action::UpdateLater);
-                    }
-                    if ui.button("이 판 건너뛰기").clicked() {
-                        out = Some(Action::UpdateSkip);
-                    }
+            }
+            UpdateView::Available { blocked, .. } => {
+                let main = if blocked.is_some() { ("배포 쪽 열기", Action::UpdateOpenPage) } else { ("지금 업데이트", Action::UpdateNow) };
+                if modal::primary(ui, main.0).clicked() {
+                    out = Some(main.1);
                 }
-                UpdateView::Ready { .. } => {
-                    if primary(ui, "다시 시작해 설치") {
-                        out = Some(Action::UpdateRestart);
-                    }
-                    if ui.button("나중에").clicked() {
-                        out = Some(Action::UpdateLater);
-                    }
+                if modal::secondary(ui, "나중에").clicked() {
+                    out = Some(Action::UpdateLater);
                 }
-                UpdateView::Failed { .. } => {
-                    if primary(ui, "닫기") {
-                        out = Some(Action::UpdateLater);
-                    }
-                    if ui.button("배포 쪽 열기").clicked() {
-                        out = Some(Action::UpdateOpenPage);
-                    }
+                if modal::secondary(ui, "이 판 건너뛰기").clicked() {
+                    out = Some(Action::UpdateSkip);
                 }
-            });
+            }
+            UpdateView::Ready { .. } => {
+                if modal::primary(ui, "다시 시작해 설치").clicked() {
+                    out = Some(Action::UpdateRestart);
+                }
+                if modal::secondary(ui, "나중에").clicked() {
+                    out = Some(Action::UpdateLater);
+                }
+            }
+            UpdateView::Failed { .. } => {
+                if modal::primary(ui, "닫기").clicked() {
+                    out = Some(Action::UpdateLater);
+                }
+                if modal::secondary(ui, "배포 쪽 열기").clicked() {
+                    out = Some(Action::UpdateOpenPage);
+                }
+            }
         });
     });
     // 바깥을 누르거나 Esc 면 '나중에'
-    if out.is_none() && modal.should_close() {
+    if out.is_none() && shown.should_close() {
         out = Some(Action::UpdateLater);
     }
     out

@@ -152,7 +152,7 @@ fn check_target(app: &Path) -> Result<PathBuf, String> {
     if app.to_string_lossy().contains("/AppTranslocation/") {
         return Err("앱이 macOS 임시 위치에서 실행 중입니다. KaiIV 를 응용 프로그램 폴더로 옮긴 뒤 다시 여십시오".into());
     }
-    let meta = std::fs::symlink_metadata(app).map_err(|e| e.to_string())?;
+    let meta = std::fs::symlink_metadata(app).map_err(|_| "설치된 앱을 찾을 수 없습니다".to_string())?;
     if !meta.is_dir() {
         return Err("설치된 앱을 찾을 수 없습니다".into());
     }

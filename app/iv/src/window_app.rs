@@ -46,6 +46,8 @@ pub enum UserEvent {
     DocWake,
     /// 업데이트 확인·받기가 진행됐다
     UpdateWake,
+    /// 메뉴 막대 항목을 골랐다
+    MenuWake,
 }
 
 //#region PDF 전체 보기 — 쪽 상태와 백그라운드 쪽 그리기
@@ -64,7 +66,14 @@ struct PdfView {
 const BACKGROUND: [u8; 3] = [24, 24, 26];
 
 pub fn run(args: Args, registry: DecoderRegistry) {
-    let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("이벤트 루프 생성 실패");
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+    // 맥: winit 기본 메뉴 대신 앱이 메뉴 막대를 만든다 (menu.rs)
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::EventLoopBuilderExtMacOS;
+        builder.with_default_menu(false);
+    }
+    let event_loop = builder.build().expect("이벤트 루프 생성 실패");
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
     let mut app = App::new(args, registry, proxy);
@@ -158,6 +167,8 @@ struct App {
     //#endregion
     /// 인앱 업데이트 (확인·받기·다시 시작해 설치)
     update: crate::update::AppUpdate,
+    /// macOS 메뉴 막대 (창이 생긴 뒤 건다)
+    menu: Option<crate::menu::MacMenu>,
     /// 자가 시험이 주입할 egui 입력 (프레임마다 한 묶음)
     injected: VecDeque<Vec<egui::Event>>,
     wait_thumbs_until: Option<Instant>,
@@ -248,6 +259,7 @@ impl App {
             text_doc: None,
             md_rendered: true,
             update: crate::update::AppUpdate::new(update_proxy, selftest_on),
+            menu: None,
             injected: VecDeque::new(),
             wait_thumbs_until: None,
             reconfigures: 0,
@@ -1035,6 +1047,103 @@ impl App {
         Some(s.width.max(s.height))
     }
 
+    //#region 메뉴 막대
+    /// 대화 상자가 떠 있는가 — 메뉴와 키 경로가 같은 규칙으로 막는다
+    fn modal_open(&self) -> bool {
+        self.browser.dialog.is_some() || self.codec_prompt || self.update.prompt
+    }
+
+    fn menu_state(&self) -> crate::menu::MenuState {
+        let lib = &self.viewer.library;
+        let dir_block = self.dir_trash_block.as_ref().filter(|(p, _)| Some(p.as_path()) == lib.dir()).and_then(|(_, b)| *b);
+        crate::menu::MenuState {
+            browse: self.viewer.mode == Mode::Browse,
+            has_current: lib.current().is_some(),
+            marked: self.viewer.marked().len(),
+            has_dir: lib.dir().is_some(),
+            kind: self.viewer.kind(),
+            all_files: self.viewer.all_files(),
+            sort: lib.sort_order(),
+            tile: crate::menu::TILES.iter().position(|(t, _)| (self.browser.tile - t).abs() < 1.0).map_or(9, |i| i as u8),
+            show_empty: self.browser.show_empty_folders,
+            codec_engine: iv_codecpack::find().map(|t| t.source.to_string()),
+            can_trash_folder: self.viewer.all_files() && lib.dir().is_some() && dir_block.is_none() && self.dir_trash_block.as_ref().is_some_and(|(p, _)| Some(p.as_path()) == lib.dir()),
+            rotated: self.viewer.turns() != 0,
+            modal: self.modal_open(),
+            text_editing: self.text_editing(),
+        }
+    }
+
+    /// 메뉴 항목 실행 — 자가 시험 `act:menu=<id>` 도 이 길로
+    pub(crate) fn on_menu(&mut self, id: &str, el: &ActiveEventLoop) {
+        use crate::menu::Cmd;
+        let s = self.menu_state();
+        if let Some(m) = &mut self.menu {
+            m.invalidate();
+        }
+        // 글 입력 중: 편집 명령은 입력 칸으로 (메뉴가 ⌘키를 가져가 egui 가 못 받는다)
+        if s.text_editing && crate::menu::is_text_edit(id) {
+            self.forward_text_edit(id);
+            return;
+        }
+        if s.modal && !crate::menu::allowed_in_modal(id) {
+            log::info!("메뉴 {id}: 대화 상자가 열려 있어 무시");
+            return;
+        }
+        match crate::menu::command(id, &s) {
+            Some(Cmd::Act(a)) => self.handle(a, el),
+            Some(Cmd::RenameFolder) => {
+                if let (true, Some(d)) = (s.browse, self.viewer.library.dir()) {
+                    self.browser.dialog = Some(iv_ui::dialog::Dialog::rename_folder(d.to_path_buf()));
+                }
+            }
+            Some(Cmd::TrashFolder) => {
+                if let (true, Some(d)) = (s.can_trash_folder && s.browse, self.viewer.library.dir()) {
+                    self.browser.dialog = Some(iv_ui::dialog::Dialog::trash_folder(d.to_path_buf()));
+                }
+            }
+            Some(Cmd::ToggleEmptyFolders) => {
+                self.browser.show_empty_folders = !self.browser.show_empty_folders;
+                self.tree_dirty = true;
+            }
+            Some(Cmd::Tile(t)) => self.browser.tile = t,
+            Some(Cmd::Rotate(q)) => {
+                let a = match (s.browse, q) {
+                    (true, q) => Action::RotateMarked(q),
+                    (false, 3) => Action::RotateCcw,
+                    _ => Action::RotateCw,
+                };
+                self.handle(a, el);
+            }
+            Some(Cmd::Help) => {
+                if self.selftest.is_none() {
+                    let _ = std::process::Command::new("/usr/bin/open").arg("https://github.com/kaifacun/image-viewer#readme").spawn();
+                }
+            }
+            None => log::warn!("모르는 메뉴 항목: {id}"),
+        }
+        self.request_redraw();
+    }
+
+    /// 메뉴가 가져간 편집 단축키를 egui 입력 칸으로 돌려준다
+    fn forward_text_edit(&mut self, id: &str) {
+        let Some((_, st)) = self.gfx.as_mut().and_then(|g| g.egui.as_mut()) else { return };
+        let key = |k| egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+        let ev = match id {
+            "copy" => Some(egui::Event::Copy),
+            "cut" => Some(egui::Event::Cut),
+            "paste" => st.clipboard_text().map(egui::Event::Paste),
+            "select_all" => Some(key(egui::Key::A)),
+            "trash" => Some(key(egui::Key::Backspace)),
+            _ => None,
+        };
+        if let Some(ev) = ev {
+            st.egui_input_mut().events.push(ev);
+        }
+        self.request_redraw();
+    }
+    //#endregion
+
     /// 받아 둔 새 판으로 바꿔 끼우고 다시 실행 — 도우미를 띄우고 앱은 끝난다
     fn restart_for_update(&mut self, r: crate::update::Restart, el: &ActiveEventLoop) {
         if self.codec_installer.is_some() || self.convert.is_some() {
@@ -1346,6 +1455,7 @@ impl App {
                 dir_trash_block: dir_block,
                 index_file,
                 app_version: env!("CARGO_PKG_VERSION"),
+                native_menu: self.menu.is_some(),
                 update_badge: update_badge.as_deref(),
             };
             let browser = &mut self.browser;
@@ -1524,6 +1634,7 @@ impl App {
             let none = egui::Modifiers::default();
             match step {
                 Step::Act(a) => self.handle(a, el),
+                Step::Menu(id) => self.on_menu(&id, el),
                 Step::Quit => el.exit(),
                 Step::Resize(w, h) => {
                     if let Some(g) = &self.gfx {
@@ -1632,7 +1743,14 @@ impl App {
                     }
                     Some(k) => {
                         let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
-                        if !self.pane_key(&k, mods, el) {
+                        // 실제 입력과 같은 관문: 대화 상자 중엔 끝내기만
+                        if self.modal_open() {
+                            let a = input::key_action(&k, mods, fullscreen, self.viewer.mode, self.viewer.kind());
+                            log::info!("자가 시험: 대화 상자 중 키 {name} → {}", if a == Some(Action::Quit) { "끝내기" } else { "무시" });
+                            if a == Some(Action::Quit) {
+                                self.handle(Action::Quit, el);
+                            }
+                        } else if !self.pane_key(&k, mods, el) {
                             if let Some(a) = input::key_action(&k, mods, fullscreen, self.viewer.mode, self.viewer.kind()) {
                                 self.handle(a, el);
                             }
@@ -1714,6 +1832,18 @@ impl ApplicationHandler<UserEvent> for App {
         // 자가 시험 창은 포커스를 빼앗지 않는다 (사용자가 다른 앱에서 치는 키가 들어오지 않게)
         let attrs = Window::default_attributes().with_title(APP).with_inner_size(LogicalSize::new(1280.0, 820.0)).with_active(self.selftest.is_none());
         let window = Arc::new(el.create_window(attrs).expect("창 생성 실패"));
+        //#region 메뉴 막대 (맥) — 창 안 egui 메뉴 대신
+        #[cfg(target_os = "macos")]
+        if self.menu.is_none() {
+            let proxy = self.proxy.clone();
+            match crate::menu::MacMenu::install(move || {
+                let _ = proxy.send_event(UserEvent::MenuWake);
+            }) {
+                Ok(m) => self.menu = Some(m),
+                Err(e) => log::warn!("메뉴 막대를 만들지 못함: {e}"),
+            }
+        }
+        //#endregion
         let (renderer, level) = renderer::create(&window, self.args.renderer);
         let egui = make_egui(&window, renderer.as_ref());
         self.viewer.config.max_texture_side = renderer.max_texture_side();
@@ -1766,6 +1896,12 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::CodecWake => self.on_codec_wake(el),
             UserEvent::DocWake => self.pump_pdf(),
+            UserEvent::MenuWake => {
+                let ids = self.menu.as_ref().map(|m| m.take()).unwrap_or_default();
+                for id in ids {
+                    self.on_menu(&id, el);
+                }
+            }
             UserEvent::UpdateWake => {
                 self.update.on_wake();
                 self.request_redraw();
@@ -1846,8 +1982,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.apply(fx, el);
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
-            // 이름 입력 창이 열려 있으면 앱 단축키를 쓰지 않는다 (Tab 으로 입력 칸을 벗어나도 ⌫·Delete 가 새지 않게)
-            WindowEvent::KeyboardInput { .. } if self.browser.dialog.is_some() => {}
+            // 대화 상자(이름 입력·폴더 휴지통·코덱·업데이트)가 열려 있으면 앱 단축키는 끝내기(⌘Q·⌘W)만
+            // (Tab 으로 입력 칸을 벗어나도 ⌫·Delete 가 새지 않게, 꺼진 메뉴의 ⌘키가 여기로 새어도 실행되지 않게 — 메뉴와 같은 규칙)
+            WindowEvent::KeyboardInput { event, .. } if self.modal_open() => {
+                let fullscreen = self.gfx.as_ref().is_some_and(|g| g.window.fullscreen().is_some());
+                if event.state == ElementState::Pressed && input::key_action(&event.logical_key, self.mods, fullscreen, self.viewer.mode, self.viewer.kind()) == Some(Action::Quit) {
+                    self.handle(Action::Quit, el);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed && self.pane_key(&event.logical_key, self.mods, el) => {
                 // 반복 입력은 트리 이동만 (Tab·⌫ 는 한 번만)
                 let _ = event.repeat;
@@ -1925,6 +2067,13 @@ impl ApplicationHandler<UserEvent> for App {
         let video_at = self.pump_video();
         self.pump_pdf();
         let update_at = self.update.tick();
+        // 메뉴 막대 사용 가능·체크 (상태가 바뀔 때만 실제로 고친다)
+        if self.menu.is_some() {
+            let s = self.menu_state();
+            if let Some(m) = &mut self.menu {
+                m.sync(&s);
+            }
+        }
         // 4) 미래 시각 중 가장 이른 것까지 대기, 없으면 이벤트가 올 때까지
         let now = Instant::now();
         let next = [self.repaint_at, test_at, video_at, update_at].into_iter().flatten().filter(|t| *t > now).min();

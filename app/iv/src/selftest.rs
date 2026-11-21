@@ -36,6 +36,8 @@ pub enum Step {
     WaitThumbs(u64),
     /// 백그라운드 스캔이 끝날 때까지 (최대 ms)
     WaitScan(u64),
+    /// 메뉴 막대 항목 (id — menu.rs) — 실제 메뉴를 누르는 것과 같은 길
+    Menu(String),
 }
 
 pub struct SelfTest {
@@ -106,6 +108,7 @@ fn parse(t: &str) -> Option<Step> {
         }
         "wait-thumbs" => Step::WaitThumbs(v.parse().unwrap_or(5000)),
         "wait-scan" => Step::WaitScan(v.parse().unwrap_or(10000)),
+        "menu" => Step::Menu(v.to_string()),
         // 동작 이름만 소문자로 (경로 값은 대소문자를 지킨다)
         "act" => Step::Act(match v.split_once('=').map_or(v.to_ascii_lowercase(), |(a, b)| format!("{}={b}", a.to_ascii_lowercase())).as_str() {
             "next" => Action::Next,

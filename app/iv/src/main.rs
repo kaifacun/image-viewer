@@ -7,6 +7,7 @@ mod args;
 mod decoders;
 mod headless;
 mod input;
+mod menu;
 mod renderer;
 mod selftest;
 mod textdoc;

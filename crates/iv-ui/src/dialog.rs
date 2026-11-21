@@ -197,10 +197,9 @@ pub fn draw(ctx: &egui::Context, d: &mut Dialog) -> DialogResult {
         return draw_trash_folder(ctx, d, &path, c);
     }
     let mut result = DialogResult::Open;
-    let resp = egui::Modal::new(Id::unique("iv-dialog")).show(ctx, |ui| {
-        ui.set_width(360.0);
-        ui.label(RichText::new(d.title()).size(15.0).strong());
-        ui.add_space(6.0);
+    let resp = crate::modal::modal("iv-dialog").show(ctx, |ui| {
+        crate::modal::begin(ui, 380.0);
+        crate::modal::title(ui, None, d.title());
         let mut out = egui::TextEdit::singleline(&mut d.text).desired_width(f32::INFINITY).id(Id::unique("iv-dialog-text")).show(ui);
         //#region 첫 프레임: 포커스 + 선택 범위 (사진은 확장자 앞까지)
         if d.fresh {
@@ -216,10 +215,9 @@ pub fn draw(ctx: &egui::Context, d: &mut Dialog) -> DialogResult {
             ui.label(RichText::new(e).size(12.0).color(Color32::from_rgb(230, 160, 90)));
         }
         let enter = out.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            let ok = ui.add_enabled(check.is_ok(), egui::Button::new("확인")).clicked();
-            if ui.button("취소").clicked() {
+        crate::modal::buttons(ui, |ui| {
+            let ok = crate::modal::primary_enabled(ui, check.is_ok(), "확인").clicked();
+            if crate::modal::secondary(ui, "취소").clicked() {
                 result = DialogResult::Cancel;
             }
             if let (true, Ok(name)) = (ok || enter, &check) {
@@ -240,29 +238,26 @@ pub fn draw(ctx: &egui::Context, d: &mut Dialog) -> DialogResult {
 /// 폴더 휴지통 확인 창 — 입력 칸 없음. 처음 포커스는 "취소" (Enter 로 실수하지 않게).
 fn draw_trash_folder(ctx: &egui::Context, d: &mut Dialog, path: &Path, c: CountSummary) -> DialogResult {
     let mut result = DialogResult::Open;
-    let resp = egui::Modal::new(Id::unique("iv-dialog")).show(ctx, |ui| {
-        ui.set_width(420.0);
-        ui.label(RichText::new(format!("'{}' 폴더를 휴지통으로 옮길까요?", name_of(path))).size(15.0).strong());
-        ui.add_space(4.0);
-        ui.add(egui::Label::new(RichText::new(path.display().to_string()).size(12.0).color(Color32::from_gray(150))).wrap());
-        ui.add_space(8.0);
+    let resp = crate::modal::modal("iv-dialog").show(ctx, |ui| {
+        crate::modal::begin(ui, 460.0);
+        crate::modal::title(ui, Some(crate::icons::Icon::Trash), format!("'{}' 폴더를 휴지통으로 옮길까요?", name_of(path)));
+        crate::modal::note(ui, path.display().to_string());
+        ui.add_space(6.0);
         let what = format!("안에 파일 {}개 · 폴더 {}개 · {}", c.files, c.folders, iv_viewer::human_bytes(c.bytes));
         let line = if c.done { what } else { format!("세는 중…  {what}") };
         ui.label(RichText::new(line).size(13.0));
-        ui.label(RichText::new("사진이 아닌 파일도 모두 함께 옮겨집니다. 휴지통에서 되살릴 수 있습니다.").size(12.0).color(Color32::from_gray(150)));
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            let cancel = ui.button("취소");
+        crate::modal::note(ui, "사진이 아닌 파일도 모두 함께 옮겨집니다. 휴지통에서 되살릴 수 있습니다.");
+        crate::modal::buttons(ui, |ui| {
+            if crate::modal::danger(ui, "휴지통으로 이동").clicked() {
+                result = DialogResult::Done(d.action(String::new()));
+            }
+            let cancel = crate::modal::secondary(ui, "취소");
             if d.fresh {
                 d.fresh = false;
                 cancel.request_focus();
             }
             if cancel.clicked() {
                 result = DialogResult::Cancel;
-            }
-            let ok = egui::Button::new(RichText::new("휴지통으로 이동").color(Color32::WHITE)).fill(Color32::from_rgb(190, 60, 55));
-            if ui.add(ok).clicked() {
-                result = DialogResult::Done(d.action(String::new()));
             }
         });
     });

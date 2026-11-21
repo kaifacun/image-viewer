@@ -224,6 +224,8 @@ pub struct BrowserModel<'a> {
     pub dir_trash_block: Option<&'static str>,
     /// 폴더 색인(스캔 결과 저장 파일): (경로, 용량 — 아직 저장 전이면 None)
     pub index_file: Option<(&'a Path, Option<u64>)>,
+    /// 메뉴를 OS 메뉴 막대(맥)가 그린다 — 창 안 메뉴 줄을 숨긴다
+    pub native_menu: bool,
     /// 지금 앱 판 (상태줄 맨 오른쪽 — 누르면 업데이트 확인)
     pub app_version: &'a str,
     /// 받을 수 있는 새 판이 있으면 그 판 (상태줄에 강조)
@@ -260,7 +262,9 @@ pub fn draw(ctx: &egui::Context, st: &mut BrowserState, m: &BrowserModel<'_>) ->
 
     let panel = |fill| egui::Frame::new().fill(fill);
     ctx.root_ui(|ui| {
-        egui::Panel::top("iv-menu").frame(panel(theme::BG_PANEL).inner_margin(Margin::symmetric(8, 2))).show(ui, |ui| menu_bar(ui, st, m, &mut out));
+        if !m.native_menu {
+            egui::Panel::top("iv-menu").frame(panel(theme::BG_PANEL).inner_margin(Margin::symmetric(8, 2))).show(ui, |ui| menu_bar(ui, st, m, &mut out));
+        }
         egui::Panel::top("iv-toolbar")
             .frame(panel(theme::BG_PANEL).inner_margin(Margin::symmetric(10, 6)).stroke(Stroke::new(1.0, theme::BORDER)))
             .exact_size(theme::TOOLBAR_H)
