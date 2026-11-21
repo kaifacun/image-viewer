@@ -59,6 +59,7 @@
 - 휴지통은 `iv-trash`(NSFileManager `trashItemAtURL`). 실패 시 `remove_file` 로 대체 금지.
 - **폴더 휴지통은 "모든 파일" 보기(`viewer.all_files()`)에서만**: UI 확인 창(`Dialog::trash_folder` — 하위 세기는 백그라운드, 닫히면 취소) → `Action::TrashFolder{path, ident}` → 앱 `trash_folder` 가 `iv_fsops::folder_trash_block`(UI 비활성 판정과 같은 함수)·`selftest_allows`·`IV_TRASH_DIR`·dev+ino(`dialog::folder_ident`) 재확인 → `iv_trash::trash`. 성공 시 `tree.removed`·keep_visible/cut_paths 접두사 정리. 시험은 `scratch/trash-test` 사본 + `act:trashfolder=<경로>`.
 - **`/Volumes` 자체에 UF_HIDDEN 이 붙어 있다** — "조상 중 Finder 숨김이면 금지" 를 그대로 하면 외장 디스크 폴더가 전부 막힌다. 숨김 검사는 디스크·홈(구성 요소 3개) 아래·트리 루트 아래만. 폴더 휴지통의 dev+ino 재확인은 마지막 검사~`trashItemAtURL` 사이 틈을 완전히 닫지 못한다(경로 기반 API의 한계 — 휴지통이라 되살릴 수 있음).
+- **"모든 파일"(`all_files`)은 종류와 직교하는 토글** — `SetKind` 가 건드리지 않는다(⌘4 = `ToggleAllFiles`). 사용자가 '모드가 아니라 체크로' 를 원함.
 - **"모든 파일" 판정은 둘**: `decodable`(등록 확장자 — 썸네일·브라우저 미리보기·파이프라인) vs `viewable`(지금 종류 — 전체 보기·`step`). 종류가 다른 파일로 전체 보기에 들어가면 재생기·쪽 넘김(모두 `viewer.kind()` 에 묶임)이 죽는다. 썸네일 요청 키(`last_requested`)에서도 decodable 아닌 것을 빼야 `wait-thumbs` 가 끝난다.
 - **우선 스캔**: 앱이 트리 재생성 때 `counts_for==None`(하위를 다 못 훑음) 줄을 깊은 것부터(방금 펼친·연 폴더의 자식 맨 앞) `scanner.prioritize` — 스캐너는 본 순회의 하위 루프 사이에서 그 폴더를 중첩 walk(`accept`: tried·cur·스택 접두사·범위·로컬·canonical). 트리 재생성은 1초 간격이라 반영은 1~2초. 시험 트리 `scratch/deeptree`(폴더 4만, 전체 8.8초).
 - **회전은 뷰어 상태(`turns`)** — 프레임에 굽지 않는다(파이프라인이 미리보기→본 디코드로 프레임을 갈아 끼우면 사라짐). `show()` 한 곳에서 `Orientation::rotated_quarters` 로 입히고, 다른 장·목록으로 가면 버린다. 렌더러(wgpu `upload`, CPU 축소 사본)는 **같은 픽셀이어도 방향은 매번 따라가야** 한다.
