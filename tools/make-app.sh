@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# KaiIV.app 만들기 → dist/KaiIV.app (선택: dist/KaiIV-<버전>.dmg)
+# KaiIV.app 만들기 → dist/app.noindex/KaiIV.app (선택: dist/KaiIV-<버전>.dmg)
+# .noindex 폴더 = Spotlight 이 색인하지 않음 (설치한 /Applications/KaiIV.app 과 둘로 보이지 않게)
 #
 #   tools/make-app.sh              애플 실리콘용 .app
 #   tools/make-app.sh --universal  애플 실리콘 + 인텔 겸용 (.app 하나)
@@ -26,7 +27,7 @@ for a in "$@"; do
 done
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-APP=dist/KaiIV.app
+APP=dist/app.noindex/KaiIV.app
 SIGN_ID=${SIGN_ID:--}
 echo "KaiIV $VERSION → $APP"
 
@@ -45,7 +46,7 @@ fi
 #endregion
 
 #region 묶음 조립
-rm -rf "$APP"
+rm -rf "$APP"; mkdir -p "$(dirname "$APP")"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/kaiiv"
 

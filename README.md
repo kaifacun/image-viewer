@@ -111,9 +111,15 @@
 cargo run --release -p iv -- <폴더>        # 브라우저 화면 (인자 없으면 홈 폴더)
 cargo run --release -p iv -- <파일>        # 그 사진 전체 보기로 시작 (Esc → 그 폴더 브라우저)
 cargo run --release -p iv -- <폴더> --renderer=cpu      # CPU 렌더러 강제
-tools/make-app.sh                  # dist/KaiIV.app
+tools/make-app.sh                  # dist/app.noindex/KaiIV.app (Spotlight 제외)
 tools/make-app.sh --universal --dmg   # 애플 실리콘+인텔 겸용 .app + 배포용 .dmg
 tools/make-app.sh --universal --dmg --update   # + 인앱 업데이트용 zip 과 서명된 update.json (배포자 키체인 키 필요)
+```
+
+배포자 서명 키를 다른 맥으로 옮길 때 (USB 등 — 저장소·클라우드에 올리지 않는다):
+```bash
+cargo run -p iv-update --bin kaiiv-update-sign -- export ~/.kaiiv/kaiiv-update-signing.key   # 키체인 → 파일 (0600, 저장소 안 거부)
+cargo run -p iv-update --bin kaiiv-update-sign -- import /Volumes/<USB>/kaiiv-update-signing.key   # 다른 맥: 파일 → 키체인 (앱 공개키와 맞아야)
 ```
 설계는 [docs/architecture.md](docs/architecture.md). 실행 파일 이름은 `kaiiv`, 내부 crate 는 `iv-*`.
 

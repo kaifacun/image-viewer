@@ -3,3 +3,6 @@
 /scratch
 .DS_Store
 /dist
+
+# 업데이트 서명 비밀키는 절대 저장소에 넣지 않는다 (만일을 위한 방어)
+*signing.key
