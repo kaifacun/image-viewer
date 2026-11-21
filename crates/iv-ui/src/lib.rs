@@ -221,6 +221,11 @@ pub fn draw(ctx: &egui::Context, m: &UiModel<'_>) -> Vec<Action> {
                         }
                     }
                     sep(ui);
+                    // 지금 보는 파일을 휴지통으로 (⌘⌫ 와 같은 길 — 되살릴 수 있음)
+                    if icon_button(ui, Icon::Trash, "휴지통으로 이동 (⌘⌫)", m.has_image, false).clicked() {
+                        actions.push(Action::Trash);
+                    }
+                    sep(ui);
                     ui.add_space(4.0);
                     ui.label(RichText::new(m.status).color(theme::TEXT_DIM).size(theme::FONT_SMALL));
                     ui.add_space(6.0);
