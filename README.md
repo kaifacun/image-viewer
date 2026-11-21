@@ -39,6 +39,12 @@
 
 비디오의 일부 형식(MKV·AVI 등)은 필요할 때 무료 FFmpeg 를 받을지 묻습니다(동의해야만 설치).
 
+### 업데이트 (0.4.24 부터)
+새 판이 나오면 앱 안에서 알려 줍니다 — **지금 업데이트** → 받아서 확인 → **다시 시작해 설치** 를 누르면 새 판으로 바뀌어 다시 열립니다. 하루 한 번 자동으로 확인하며(창에서 끌 수 있음), 상태줄 오른쪽 판 번호나 **파일 → 업데이트 확인…** 으로 언제든 확인할 수 있습니다.
+- 업데이트 정보는 배포자의 Ed25519 서명이 맞을 때만 믿고, 받은 파일은 크기·SHA-256·코드 서명을 확인한 뒤에만 설치합니다. 실패하면 옛 앱으로 되돌립니다.
+- `Applications` 에 쓸 권한이 없는 계정이거나 dmg 안에서 바로 실행 중이면 자동 설치 대신 배포 페이지를 열어 드립니다.
+- 0.4.23 이하에서는 이번 한 번만 dmg 로 직접 바꿔 주십시오.
+
 ## 조작 — 브라우저
 | 입력 | 동작 |
 |---|---|
@@ -107,6 +113,7 @@ cargo run --release -p iv -- <파일>        # 그 사진 전체 보기로 시�
 cargo run --release -p iv -- <폴더> --renderer=cpu      # CPU 렌더러 강제
 tools/make-app.sh                  # dist/KaiIV.app
 tools/make-app.sh --universal --dmg   # 애플 실리콘+인텔 겸용 .app + 배포용 .dmg
+tools/make-app.sh --universal --dmg --update   # + 인앱 업데이트용 zip 과 서명된 update.json (배포자 키체인 키 필요)
 ```
 설계는 [docs/architecture.md](docs/architecture.md). 실행 파일 이름은 `kaiiv`, 내부 crate 는 `iv-*`.
 

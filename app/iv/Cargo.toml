@@ -34,6 +34,7 @@ iv-clipboard.workspace = true
 iv-video.workspace = true
 iv-codecpack.workspace = true
 iv-ffmpeg.workspace = true
+iv-update.workspace = true
 egui.workspace = true
 egui-winit.workspace = true
 winit.workspace = true

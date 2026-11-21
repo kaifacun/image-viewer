@@ -44,6 +44,8 @@ pub enum UserEvent {
     CodecWake,
     /// 문서 쪽 그리기가 끝났다
     DocWake,
+    /// 업데이트 확인·받기가 진행됐다
+    UpdateWake,
 }
 
 //#region PDF 전체 보기 — 쪽 상태와 백그라운드 쪽 그리기
@@ -154,6 +156,8 @@ struct App {
     /// 마크다운을 꾸며 보이기 (끄면 원문) — 파일을 넘겨도 유지
     md_rendered: bool,
     //#endregion
+    /// 인앱 업데이트 (확인·받기·다시 시작해 설치)
+    update: crate::update::AppUpdate,
     /// 자가 시험이 주입할 egui 입력 (프레임마다 한 묶음)
     injected: VecDeque<Vec<egui::Event>>,
     wait_thumbs_until: Option<Instant>,
@@ -184,6 +188,8 @@ impl App {
         });
         //#endregion
         let codec_proxy = proxy.clone();
+        let update_proxy = proxy.clone();
+        let selftest_on = std::env::var_os("IV_SELFTEST").is_some();
         let thumbs = ThumbService::new(registry, ThumbConfig { gate: Some(gate), ..Default::default() }, move || {
             let _ = proxy.send_event(UserEvent::ThumbWake);
         });
@@ -241,6 +247,7 @@ impl App {
             pdf: None,
             text_doc: None,
             md_rendered: true,
+            update: crate::update::AppUpdate::new(update_proxy, selftest_on),
             injected: VecDeque::new(),
             wait_thumbs_until: None,
             reconfigures: 0,
@@ -1028,11 +1035,45 @@ impl App {
         Some(s.width.max(s.height))
     }
 
+    /// 받아 둔 새 판으로 바꿔 끼우고 다시 실행 — 도우미를 띄우고 앱은 끝난다
+    fn restart_for_update(&mut self, r: crate::update::Restart, el: &ActiveEventLoop) {
+        if self.codec_installer.is_some() || self.convert.is_some() {
+            let fx = self.viewer.say("코덱 엔진 설치·영상 변환이 끝난 뒤 다시 시작해 주십시오");
+            self.apply(fx, el);
+            return;
+        }
+        if self.selftest.is_some() {
+            log::info!("자가 시험: 업데이트 적용 생략 ({} → {})", r.staged.dir.display(), r.target.display());
+            let fx = self.viewer.say("자가 시험: 업데이트 적용은 생략합니다");
+            self.apply(fx, el);
+            return;
+        }
+        match iv_update::install::spawn_apply(&r.staged, &r.target, &r.log) {
+            Ok(()) => {
+                log::info!("업데이트 도우미 시작 — 앱을 끝냅니다");
+                el.exit();
+            }
+            Err(e) => {
+                let fx = self.viewer.say(e);
+                self.apply(fx, el);
+            }
+        }
+    }
+
     fn handle(&mut self, a: Action, el: &ActiveEventLoop) {
         // 필터가 바뀌면 트리(숨김·숫자)도 그 필터로 다시 만든다 — 다시 훑지 않고 조회만
         if matches!(a, Action::SetFilter(_) | Action::SetKind(_)) {
             self.tree_dirty = true;
         }
+        //#region 인앱 업데이트 — 앱 몫 (뷰어 상태와 무관)
+        if matches!(a, Action::UpdateCheck | Action::UpdateNow | Action::UpdateLater | Action::UpdateSkip | Action::UpdateRestart | Action::UpdateOpenPage | Action::SetUpdateAuto(_)) {
+            if let Some(r) = self.update.handle(&a) {
+                self.restart_for_update(r, el);
+            }
+            self.request_redraw();
+            return;
+        }
+        //#endregion
         //#region 코덱 엔진 받기 창의 답
         match &a {
             Action::InstallCodecs => {
@@ -1207,6 +1248,8 @@ impl App {
     fn build_ui(&mut self, status: &str) -> (Option<EguiPaint>, Vec<Action>) {
         let mut ui_actions = Vec::new();
         let mut prompt_actions: Vec<Action> = Vec::new();
+        let update_ui = self.update.ui();
+        let update_badge = self.update.badge();
         let Some(g) = &mut self.gfx else { return (None, ui_actions) };
         let Some((ctx, state)) = &mut g.egui else { return (None, ui_actions) };
         let mut raw = state.take_egui_input(&g.window);
@@ -1302,6 +1345,8 @@ impl App {
                 tree_trash_block: &self.tree_trash_block,
                 dir_trash_block: dir_block,
                 index_file,
+                app_version: env!("CARGO_PKG_VERSION"),
+                update_badge: update_badge.as_deref(),
             };
             let browser = &mut self.browser;
             let prompt = self.codec_prompt;
@@ -1309,6 +1354,9 @@ impl App {
                 bout = Some(iv_ui::browser::draw(ctx, browser, &model));
                 if prompt {
                     prompt_actions.extend(iv_ui::codec_prompt(ctx));
+                }
+                if let Some(u) = &update_ui {
+                    prompt_actions.extend(iv_ui::update_prompt(ctx, &u.as_ui()));
                 }
             })
         } else {
@@ -1344,6 +1392,9 @@ impl App {
                 ui_actions = iv_ui::draw(ctx, &model);
                 if prompt {
                     prompt_actions.extend(iv_ui::codec_prompt(ctx));
+                }
+                if let Some(u) = &update_ui {
+                    prompt_actions.extend(iv_ui::update_prompt(ctx, &u.as_ui()));
                 }
             })
         };
@@ -1715,6 +1766,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             UserEvent::CodecWake => self.on_codec_wake(el),
             UserEvent::DocWake => self.pump_pdf(),
+            UserEvent::UpdateWake => {
+                self.update.on_wake();
+                self.request_redraw();
+            }
             UserEvent::ThumbWake => {
                 // egui 가 없어도 반드시 drain (pending 플래그 리셋)
                 let evs = self.thumbs.drain();
@@ -1869,9 +1924,10 @@ impl ApplicationHandler<UserEvent> for App {
         // 3) 비디오 프레임 (재생 중에만 깨어난다 — 멈추면 대기 CPU 0)
         let video_at = self.pump_video();
         self.pump_pdf();
+        let update_at = self.update.tick();
         // 4) 미래 시각 중 가장 이른 것까지 대기, 없으면 이벤트가 올 때까지
         let now = Instant::now();
-        let next = [self.repaint_at, test_at, video_at].into_iter().flatten().filter(|t| *t > now).min();
+        let next = [self.repaint_at, test_at, video_at, update_at].into_iter().flatten().filter(|t| *t > now).min();
         el.set_control_flow(match next {
             Some(t) => ControlFlow::WaitUntil(t),
             None => ControlFlow::Wait,

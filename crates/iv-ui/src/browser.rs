@@ -224,6 +224,10 @@ pub struct BrowserModel<'a> {
     pub dir_trash_block: Option<&'static str>,
     /// 폴더 색인(스캔 결과 저장 파일): (경로, 용량 — 아직 저장 전이면 None)
     pub index_file: Option<(&'a Path, Option<u64>)>,
+    /// 지금 앱 판 (상태줄 맨 오른쪽 — 누르면 업데이트 확인)
+    pub app_version: &'a str,
+    /// 받을 수 있는 새 판이 있으면 그 판 (상태줄에 강조)
+    pub update_badge: Option<&'a str>,
 }
 
 #[derive(Default)]
@@ -267,6 +271,20 @@ pub fn draw(ctx: &egui::Context, st: &mut BrowserState, m: &BrowserModel<'_>) ->
                 ui.horizontal(|ui| {
                     // 오른쪽(스캔 상태)을 먼저 놓고 남은 폭에 왼쪽 글을 한 줄로 (넘치면 말줄임)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        //#region 앱 판 — 누르면 업데이트 확인, 새 판이 있으면 강조 (맨 오른쪽)
+                        let (text, color, tip) = match m.update_badge {
+                            Some(v) => (format!("● 새 판 {v}"), theme::ACCENT, format!("KaiIV {v} 로 업데이트")),
+                            None => (format!("v{}", m.app_version), theme::TEXT_FAINT, "업데이트 확인".to_string()),
+                        };
+                        let resp = ui.add(egui::Label::new(RichText::new(text).size(theme::FONT_SMALL).color(color)).sense(Sense::click()));
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if resp.on_hover_text(tip).clicked() {
+                            out.actions.push(Action::UpdateCheck);
+                        }
+                        ui.add_space(10.0);
+                        //#endregion
                         //#region 폴더 색인 — 용량 + Finder 에서 보기 아이콘 (맨 오른쪽)
                         if let Some((path, size)) = m.index_file {
                             let tip = format!("폴더 색인 파일을 Finder 에서 보기\n{}", path.display());
@@ -382,6 +400,10 @@ fn menu_bar(ui: &mut egui::Ui, st: &mut BrowserState, m: &BrowserModel<'_>, out:
                 if folder_trash_item(ui, st, m, d, m.dir_trash_block, "이 폴더를 휴지통으로…") {
                     ui.close();
                 }
+            }
+            ui.separator();
+            if ui.button("업데이트 확인…").clicked() {
+                out.actions.push(Action::UpdateCheck);
             }
             ui.separator();
             if ui.add(egui::Button::new("끝내기").shortcut_text("⌘Q")).clicked() {

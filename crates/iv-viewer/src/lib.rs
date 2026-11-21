@@ -119,6 +119,14 @@ pub enum Action {
     /// 추가 코덱 엔진 받기에 동의 / 나중에 (앱이 처리 — 뷰어 상태와 무관)
     InstallCodecs,
     DismissCodecPrompt,
+    /// 인앱 업데이트 (앱이 처리 — 뷰어 상태와 무관): 확인 · 지금 받기 · 나중에 · 이 판 건너뛰기 · 다시 시작해 설치 · 배포 쪽 열기 · 자동 확인 켜기/끄기
+    UpdateCheck,
+    UpdateNow,
+    UpdateLater,
+    UpdateSkip,
+    UpdateRestart,
+    UpdateOpenPage,
+    SetUpdateAuto(bool),
 }
 
 /// 문서 쪽 명령
@@ -866,7 +874,16 @@ impl ViewerState {
                 }
                 self.request(FileOp::TrashFolder { path, ident })
             }
-            Action::InstallCodecs | Action::DismissCodecPrompt | Action::ToggleMarkdown => Effects::default(),
+            Action::InstallCodecs
+            | Action::DismissCodecPrompt
+            | Action::ToggleMarkdown
+            | Action::UpdateCheck
+            | Action::UpdateNow
+            | Action::UpdateLater
+            | Action::UpdateSkip
+            | Action::UpdateRestart
+            | Action::UpdateOpenPage
+            | Action::SetUpdateAuto(_) => Effects::default(),
             Action::Page(cmd) => {
                 if self.mode != Mode::View || self.kind != MediaKind::Document {
                     return Effects::default();

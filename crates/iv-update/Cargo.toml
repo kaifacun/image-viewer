@@ -1,0 +1,20 @@
+[package]
+name = "iv-update"
+description = "인앱 업데이트 — 서명된 피드(Ed25519) 확인·받기·검증·같은 볼륨 교체·다시 실행. 앱 UI 를 모른다."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "kaiiv-update-sign"
+path = "src/bin/kaiiv-update-sign.rs"
+
+[dependencies]
+log.workspace = true
+ed25519-dalek = "2"
+sha2 = "0.10"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+getrandom = "0.3"
+libc = "0.2"

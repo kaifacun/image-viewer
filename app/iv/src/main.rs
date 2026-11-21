@@ -10,9 +10,15 @@ mod input;
 mod renderer;
 mod selftest;
 mod textdoc;
+mod update;
 mod window_app;
 
 fn main() {
+    // 업데이트 도우미 — 앱이 끝나기를 기다렸다 새 판으로 바꿔 끼운다 (창·디코더를 띄우지 않는다)
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().map(String::as_str) == Some(iv_update::APPLY_FLAG) {
+        std::process::exit(iv_update::run_apply(&raw[1..]));
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"))
         .format_timestamp_millis()
         .init();

@@ -4,6 +4,10 @@
 #   tools/make-app.sh              애플 실리콘용 .app
 #   tools/make-app.sh --universal  애플 실리콘 + 인텔 겸용 (.app 하나)
 #   tools/make-app.sh --dmg        .app 을 담은 .dmg 도 만든다 (배포용)
+#   tools/make-app.sh --update     인앱 업데이트용 KaiIV-<판>.zip + 서명된 update.json (키체인 서명 키 필요)
+#
+# 배포 한 번: tools/make-app.sh --universal --dmg --update → 세 파일을 한 번의 gh release create 로 올린다
+#   (latest 가 update.json 없는 릴리스를 가리키는 틈이 없게)
 #
 # 서명: 기본은 ad-hoc(-). 개발자 ID 가 있으면 SIGN_ID="Developer ID Application: ..." 로 넘긴다.
 # ad-hoc 서명 앱은 다른 맥에서 처음 열 때 Gatekeeper 가 막는다 (README 의 '처음 열기' 참고).
@@ -11,11 +15,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
-UNIVERSAL=0; DMG=0
+UNIVERSAL=0; DMG=0; UPDATE=0
 for a in "$@"; do
   case "$a" in
     --universal) UNIVERSAL=1 ;;
     --dmg) DMG=1 ;;
+    --update) UPDATE=1 ;;
     *) echo "알 수 없는 인자: $a" >&2; exit 2 ;;
   esac
 done
@@ -93,5 +98,21 @@ if [ "$DMG" = 1 ]; then
   hdiutil create -volname "KaiIV $VERSION" -srcfolder "$STAGE" -ov -format UDZO "$DMGFILE" >/dev/null
   [ "$SIGN_ID" = "-" ] || codesign --sign "$SIGN_ID" "$DMGFILE"
   echo "DMG: $DMGFILE"
+fi
+if [ "$UPDATE" = 1 ]; then
+  # 업데이트는 애플 실리콘·인텔 모두에게 가므로 겸용만 (앱도 설치 전에 아키텍처를 검사한다)
+  [ "$UNIVERSAL" = 1 ] || { echo "--update 는 --universal 과 함께만" >&2; exit 2; }
+  ZIP="dist/KaiIV-$VERSION.zip"
+  rm -f "$ZIP" dist/update.json
+  # ditto --keepParent: 서명·심볼릭 링크·확장 속성을 그대로 (zip 명령은 서명을 깬다)
+  ditto -c -k --keepParent "$APP" "$ZIP"
+  # 알림 글 = CHANGELOG 의 이 판 절 (머리 줄 다음부터 다음 ## 전까지)
+  NOTES=$(mktemp)
+  awk -v v="## $VERSION " 'index($0, v) == 1 {on=1; next} on && /^## / {exit} on {print}' CHANGELOG.md | sed '/^[[:space:]]*$/d' > "$NOTES"
+  [ -s "$NOTES" ] || { echo "CHANGELOG 에 $VERSION 절이 없습니다" >&2; exit 1; }
+  URL="https://github.com/kaifacun/image-viewer/releases/download/v$VERSION/KaiIV-$VERSION.zip"
+  cargo run -q --release -p iv-update --bin kaiiv-update-sign -- sign "$ZIP" "$VERSION" "$URL" "$NOTES" dist/update.json
+  rm -f "$NOTES"
+  echo "업데이트: $ZIP + dist/update.json"
 fi
 echo "완료: $APP ($(du -sh "$APP" | cut -f1))"

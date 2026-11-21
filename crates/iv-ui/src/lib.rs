@@ -282,6 +282,146 @@ pub fn codec_prompt(ctx: &egui::Context) -> Option<Action> {
     out
 }
 
+/// 업데이트 창에 보일 상태 (앱이 iv-update 상태를 옮겨 담는다 — iv-ui 는 iv-update 를 모른다)
+pub enum UpdateView<'a> {
+    Checking,
+    UpToDate,
+    /// 새 판. `blocked` = 자동 설치를 못 하는 까닭 (있으면 배포 쪽 열기만)
+    Available { version: &'a str, notes: &'a str, blocked: Option<&'a str> },
+    Downloading { version: &'a str, got: u64, total: u64 },
+    Ready { version: &'a str },
+    Failed { message: &'a str },
+}
+
+pub struct UpdateUi<'a> {
+    pub current: &'a str,
+    pub view: UpdateView<'a>,
+    /// 하루 한 번 자동 확인
+    pub auto: bool,
+}
+
+fn primary(ui: &mut egui::Ui, label: &str) -> bool {
+    ui.add(egui::Button::new(RichText::new(label).strong().color(Color32::WHITE)).fill(theme::ACCENT_BG)).clicked()
+}
+
+/// 인앱 업데이트 창 — 답이 있으면 그 Action
+pub fn update_prompt(ctx: &egui::Context, u: &UpdateUi<'_>) -> Option<Action> {
+    let mut out = None;
+    let modal = egui::Modal::new(egui::Id::unique("iv-update-prompt")).show(ctx, |ui| {
+        ui.set_width(460.0);
+        let title = match &u.view {
+            UpdateView::Checking => "업데이트 확인 중…".to_string(),
+            UpdateView::UpToDate => "최신 판입니다".to_string(),
+            UpdateView::Available { version, .. } => format!("새 판 KaiIV {version} 이 나왔습니다"),
+            UpdateView::Downloading { version, .. } => format!("KaiIV {version} 받는 중…"),
+            UpdateView::Ready { version } => format!("KaiIV {version} 설치 준비가 끝났습니다"),
+            UpdateView::Failed { .. } => "업데이트하지 못했습니다".to_string(),
+        };
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), egui::Sense::hover());
+            icons::paint(ui.painter(), icons::Icon::Refresh, r, theme::ACCENT);
+            ui.label(RichText::new(title).size(15.0).strong().color(theme::TEXT));
+        });
+        ui.add_space(8.0);
+        let dim = |ui: &mut egui::Ui, t: &str| {
+            ui.label(RichText::new(t).color(theme::TEXT_DIM));
+        };
+        match &u.view {
+            UpdateView::Checking => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    dim(ui, "배포처에서 새 판을 찾고 있습니다.");
+                });
+            }
+            UpdateView::UpToDate => dim(ui, &format!("지금 쓰시는 KaiIV {} 이 최신 판입니다.", u.current)),
+            UpdateView::Available { notes, blocked, .. } => {
+                dim(ui, &format!("지금 판: {}", u.current));
+                if !notes.is_empty() {
+                    ui.add_space(6.0);
+                    egui::Frame::new().fill(theme::BG_CANVAS).corner_radius(6).inner_margin(Margin::same(10)).show(ui, |ui| {
+                        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            // 알림 글은 평문 그대로 (링크·마크다운 해석 안 함)
+                            ui.label(RichText::new(*notes).size(theme::FONT_SMALL).color(theme::TEXT));
+                        });
+                    });
+                }
+                if let Some(b) = blocked {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(format!("자동 설치 불가: {b}")).size(theme::FONT_SMALL).color(theme::WARN));
+                }
+            }
+            UpdateView::Downloading { got, total, .. } => {
+                let f = if *total > 0 { (*got as f32 / *total as f32).clamp(0.0, 1.0) } else { 0.0 };
+                ui.add(egui::ProgressBar::new(f).show_percentage());
+                ui.label(RichText::new(format!("{} / {} · 받은 뒤 서명과 해시를 확인합니다", iv_viewer::human_bytes(*got), iv_viewer::human_bytes(*total))).size(theme::FONT_SMALL).color(theme::TEXT_FAINT));
+            }
+            UpdateView::Ready { .. } => dim(ui, "서명과 해시를 확인했습니다. KaiIV 를 다시 시작하면 새 판으로 바뀝니다."),
+            UpdateView::Failed { message } => {
+                ui.label(RichText::new(*message).color(theme::ERROR));
+                ui.add_space(4.0);
+                dim(ui, "배포 쪽에서 직접 받으실 수도 있습니다.");
+            }
+        }
+        ui.add_space(10.0);
+        let mut auto = u.auto;
+        if ui.checkbox(&mut auto, RichText::new("하루 한 번 자동으로 확인").size(theme::FONT_SMALL).color(theme::TEXT_DIM)).changed() {
+            out = Some(Action::SetUpdateAuto(auto));
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| match &u.view {
+                UpdateView::Checking | UpdateView::Downloading { .. } => {
+                    if ui.button("닫기").clicked() {
+                        out = Some(Action::UpdateLater);
+                    }
+                }
+                UpdateView::UpToDate => {
+                    if primary(ui, "확인") {
+                        out = Some(Action::UpdateLater);
+                    }
+                }
+                UpdateView::Available { blocked, .. } => {
+                    if blocked.is_some() {
+                        if primary(ui, "배포 쪽 열기") {
+                            out = Some(Action::UpdateOpenPage);
+                        }
+                    } else if primary(ui, "지금 업데이트") {
+                        out = Some(Action::UpdateNow);
+                    }
+                    if ui.button("나중에").clicked() {
+                        out = Some(Action::UpdateLater);
+                    }
+                    if ui.button("이 판 건너뛰기").clicked() {
+                        out = Some(Action::UpdateSkip);
+                    }
+                }
+                UpdateView::Ready { .. } => {
+                    if primary(ui, "다시 시작해 설치") {
+                        out = Some(Action::UpdateRestart);
+                    }
+                    if ui.button("나중에").clicked() {
+                        out = Some(Action::UpdateLater);
+                    }
+                }
+                UpdateView::Failed { .. } => {
+                    if primary(ui, "닫기") {
+                        out = Some(Action::UpdateLater);
+                    }
+                    if ui.button("배포 쪽 열기").clicked() {
+                        out = Some(Action::UpdateOpenPage);
+                    }
+                }
+            });
+        });
+    });
+    // 바깥을 누르거나 Esc 면 '나중에'
+    if out.is_none() && modal.should_close() {
+        out = Some(Action::UpdateLater);
+    }
+    out
+}
+
 //#region 글 문서 보기 — 마크다운(꾸민 보기/원문)·글·코드(줄 번호)
 fn text_view(ctx: &egui::Context, t: &TextView<'_>, actions: &mut Vec<Action>) {
     ctx.root_ui(|ui| {
