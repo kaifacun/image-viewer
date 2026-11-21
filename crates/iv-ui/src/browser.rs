@@ -583,7 +583,7 @@ fn segmented_kind(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut)
     egui::Frame::new().fill(theme::BG_CANVAS).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(2)).show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         for (i, k) in iv_core::formats::MediaKind::ALL.into_iter().enumerate() {
-            let on = m.kind == k && !m.all_files;
+            let on = m.kind == k;
             let icon = match k {
                 iv_core::formats::MediaKind::Image => Icon::Photo,
                 iv_core::formats::MediaKind::Video => Icon::Video,
@@ -601,20 +601,37 @@ fn segmented_kind(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut)
                 out.actions.push(Action::SetKind(k));
             }
         }
-        //#region 네 번째 칸 — 모든 파일 (폴더 정리용)
-        let on = m.all_files;
-        let galley = ui.painter().layout_no_wrap("모든 파일".to_string(), FontId::proportional(theme::FONT_BODY), Color32::WHITE);
-        let (r, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x + 40.0, 26.0), Sense::click());
-        let bg = if on { theme::ACCENT_BG } else if resp.hovered() { theme::HOVER } else { Color32::TRANSPARENT };
-        ui.painter().rect_filled(r, CornerRadius::same(6), bg);
-        let fg = if on { Color32::WHITE } else { theme::TEXT_DIM };
-        crate::icons::paint(ui.painter(), Icon::Folder, Rect::from_center_size(Pos2::new(r.min.x + 17.0, r.center().y), Vec2::splat(14.0)), fg);
-        ui.painter().galley(Pos2::new(r.min.x + 30.0, r.center().y - galley.size().y / 2.0), galley, fg);
-        if resp.on_hover_text("모든 파일 보기 (⌘4) — 사진이 아닌 파일·빈 폴더도 보이고, 폴더를 휴지통으로 보낼 수 있습니다").clicked() && !on {
-            out.actions.push(Action::SetAllFiles(true));
-        }
-        //#endregion
     });
+    all_files_toggle(ui, m, out);
+}
+
+/// "모든 파일" 체크 상자 — 종류 칸과 따로 도는 토글 (켜면 다른 파일·빈 폴더도 보이고 폴더 삭제 가능)
+fn all_files_toggle(ui: &mut egui::Ui, m: &BrowserModel<'_>, out: &mut BrowserOut) {
+    let on = m.all_files;
+    let galley = ui.painter().layout_no_wrap("모든 파일".to_string(), FontId::proportional(theme::FONT_BODY), Color32::WHITE);
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x + 38.0, 30.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(r, CornerRadius::same(6), theme::HOVER);
+    }
+    // 체크 상자
+    let b = Rect::from_center_size(Pos2::new(r.min.x + 16.0, r.center().y), Vec2::splat(14.0));
+    if on {
+        ui.painter().rect_filled(b, CornerRadius::same(3), theme::ACCENT);
+        let p = |x: f32, y: f32| Pos2::new(b.min.x + x * b.width(), b.min.y + y * b.height());
+        ui.painter().line(vec![p(0.22, 0.52), p(0.43, 0.72), p(0.78, 0.3)], Stroke::new(1.8, Color32::WHITE));
+    } else {
+        ui.painter().rect_stroke(b, CornerRadius::same(3), Stroke::new(1.2, theme::TEXT_DIM), StrokeKind::Inside);
+    }
+    let fg = if on { theme::TEXT } else { theme::TEXT_DIM };
+    ui.painter().galley(Pos2::new(r.min.x + 30.0, r.center().y - galley.size().y / 2.0), galley, fg);
+    let tip = if on {
+        "모든 파일 끄기 (⌘4) — 지금 종류의 파일만 보입니다"
+    } else {
+        "모든 파일 (⌘4) — 이 폴더의 다른 파일·빈 폴더도 보이고, 폴더를 휴지통으로 보낼 수 있습니다"
+    };
+    if resp.on_hover_text(tip).clicked() {
+        out.actions.push(Action::SetAllFiles(!on));
+    }
 }
 
 //#region 경로 표시 — 폴더 이름을 누르면 그 폴더로, 빈 곳을 누르면 글로 고쳐 쓰기

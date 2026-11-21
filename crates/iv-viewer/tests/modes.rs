@@ -440,8 +440,13 @@ fn all_files_view_and_folder_trash_gate() {
     // 이 보기에선 폴더 휴지통 요청이 앱으로 간다
     let fx = v.handle(Action::TrashFolder { path: d.join("sub"), ident: None }, &l);
     assert!(fx.app.is_some());
-    // 종류 칸을 누르면 풀린다 (같은 종류여도)
-    let fx = v.handle(Action::SetKind(iv_core::formats::MediaKind::Image), &l);
+    // 종류를 바꿔도 "모든 파일" 토글은 그대로 (비디오 종류에서도 모든 파일이 보인다)
+    let fx = v.handle(Action::SetKind(iv_core::formats::MediaKind::Video), &l);
+    assert!(fx.library_changed && v.all_files());
+    assert_eq!(v.library.len(), 5);
+    let _ = v.handle(Action::SetKind(iv_core::formats::MediaKind::Image), &l);
+    // ⌘4 로 끄면 그 종류 파일만
+    let fx = v.handle(Action::ToggleAllFiles, &l);
     assert!(fx.library_changed && !v.all_files());
     assert_eq!(v.library.len(), 3);
     let _ = std::fs::remove_dir_all(&d);

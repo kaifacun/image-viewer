@@ -102,8 +102,11 @@ pub enum Action {
     SetFilter(Option<Vec<&'static str>>),
     /// 화면 종류 바꾸기 (사진 ↔ 비디오) — 필터는 풀고 목록을 그 종류로 다시 나열
     SetKind(MediaKind),
-    /// "모든 파일" 보기 켜기·끄기 — 격자에 폴더의 모든 파일, 트리에 모든 폴더. 이 보기에서만 폴더를 휴지통으로 보낼 수 있다
+    /// "모든 파일" 켜기·끄기 — 종류(사진·비디오·문서)와 따로 도는 토글. 켜면 격자에 폴더의 모든 파일, 트리에 모든 폴더.
+    /// 켜져 있을 때만 폴더를 휴지통으로 보낼 수 있다. 전체 보기·넘기기는 여전히 지금 종류의 파일만
     SetAllFiles(bool),
+    /// "모든 파일" 뒤집기 (⌘4)
+    ToggleAllFiles,
     /// 이 폴더를 휴지통으로 ("모든 파일" 보기·브라우저에서만) — 실제 이동은 앱이
     /// `ident` = 확인 창을 열 때의 (dev, ino) — 그 사이 다른 것으로 바뀌었으면 앱이 거부한다
     TrashFolder { path: PathBuf, ident: Option<(u64, u64)> },
@@ -818,11 +821,11 @@ impl ViewerState {
                 self.request(FileOp::MoveTo { dest })
             }
             Action::SetKind(k) => {
-                if k == self.kind && !self.all_files {
+                if k == self.kind {
                     return Effects::default();
                 }
+                // "모든 파일" 토글은 종류를 바꿔도 그대로 둔다
                 self.kind = k;
-                self.all_files = false;
                 self.filter = None;
                 let _ = self.set_turns(0);
                 if self.browse_available {
@@ -838,6 +841,7 @@ impl ViewerState {
                     None => Effects::redraw(),
                 }
             }
+            Action::ToggleAllFiles => self.handle(Action::SetAllFiles(!self.all_files), loader),
             Action::SetAllFiles(on) => {
                 if on == self.all_files {
                     return Effects::default();
